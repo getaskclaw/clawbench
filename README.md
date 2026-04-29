@@ -6,6 +6,12 @@ It is not a YABS clone. YABS answers “how fast is this box?”
 
 ABS tries to answer: **“should I keep this VPS?”**
 
+## Specs are not performance
+
+Do not trust VPS plan labels alone. A **6 vCPU / 16 GB RAM** VPS can be much worse than a **3 vCPU / 12 GB RAM** VPS if the larger plan has weaker shared CPU, slower storage, worse noisy-neighbor pressure, or poorer network routing.
+
+That is the point of ABS: measure CPU, memory, disk latency/fsync, and network sanity before deciding whether a VPS is actually worth keeping.
+
 ## Run
 
 ```bash
