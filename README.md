@@ -38,6 +38,17 @@ curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash -
 curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash -s -- -n
 ```
 
+## China / restricted DNS fallback
+
+Some VPSes, especially in China, cannot resolve `raw.githubusercontent.com` or `cdn.jsdelivr.net`. If GitHub raw fails with `Could not resolve host`, this jsDelivr + pinned-IP fallback may work:
+
+```bash
+curl --resolve cdn.jsdelivr.net:443:104.16.175.226 \
+  -fsSL https://cdn.jsdelivr.net/gh/getaskclaw/abs@main/abs.sh | bash -s -- -n
+```
+
+`-n` / `--no-install` skips package installation. This is useful when package managers hang on broken or slow mirrors. If `fio` is missing, ABS will fall back to limited disk checks and the score may be partial.
+
 ## What ABS measures
 
 - CPU: sysbench single-thread and all-thread throughput
