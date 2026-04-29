@@ -112,6 +112,7 @@ The verdict is meant for practical VPS decisions. It may warn about OpenVZ/conta
 --net-info           check IPv4/IPv6 and external IP/ASN
 --json               print JSON result
 --json-file PATH     copy JSON result to PATH
+--verbose            print full system/tool header
 -h, --help           help
 ```
 

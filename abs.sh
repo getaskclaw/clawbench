@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 export LC_ALL=C
 
-VERSION="0.4.6"
+VERSION="0.4.7"
 TIME_START_EPOCH="$(date +%s)"
 TIME_START_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 VCPU="$(nproc 2>/dev/null || echo 1)"
@@ -24,6 +24,7 @@ NETWORK_PROFILE="${NETWORK_PROFILE:-cloudflare}"
 IPERF_SERVER="${IPERF_SERVER:-}"
 IPERF_TIME="${IPERF_TIME:-5}"
 IPERF_PARALLEL="${IPERF_PARALLEL:-2}"
+VERBOSE="${VERBOSE:-0}"
 JSON_PRINT="${JSON_PRINT:-0}"
 JSON_FILE="${JSON_FILE:-}"
 LOGDIR="${LOGDIR:-/tmp/abs-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
@@ -66,6 +67,7 @@ Options:
   --network-yabs       Cloudflare + full YABS public iperf3 list
   --no-network         skip network speed sanity test
   --iperf HOST[:PORT]  optional iperf3 send/recv against your own server
+  --verbose            print full system/tool header
   --json               print JSON result at the end
   --json-file PATH     write JSON result to PATH as well as logdir
   -h, --help           help
@@ -107,6 +109,7 @@ while [ "$#" -gt 0 ]; do
     --iperf)
       shift; [ "$#" -gt 0 ] || { echo "Missing value for --iperf" >&2; exit 2; }
       IPERF_SERVER="$1"; NETWORK=1 ;;
+    --verbose) VERBOSE=1 ;;
     --json) JSON_PRINT=1 ;;
     --json-file)
       shift; [ "$#" -gt 0 ] || { echo "Missing value for --json-file" >&2; exit 2; }
@@ -143,6 +146,7 @@ if ! is_pos_int "$IPERF_PARALLEL"; then echo "Invalid IPERF_PARALLEL: $IPERF_PAR
 if [ "$NET_INFO" != "0" ] && [ "$NET_INFO" != "1" ]; then echo "Invalid NET_INFO: $NET_INFO" >&2; exit 2; fi
 if [ "$NETWORK" != "0" ] && [ "$NETWORK" != "1" ]; then echo "Invalid NETWORK: $NETWORK" >&2; exit 2; fi
 case "$NETWORK_PROFILE" in cloudflare|full|yabs|none) ;; *) echo "Invalid NETWORK_PROFILE: $NETWORK_PROFILE" >&2; exit 2 ;; esac
+if [ "$VERBOSE" != "0" ] && [ "$VERBOSE" != "1" ]; then echo "Invalid VERBOSE: $VERBOSE" >&2; exit 2; fi
 
 if [ -n "$JOBS_ENV" ]; then
   JOBS="$JOBS_ENV"
@@ -985,7 +989,7 @@ trap cleanup EXIT
 if [ "$NET_INFO" = "1" ]; then
   echo "Network info lookup enabled: checks IPv4/IPv6 and external IP/ASN. Use --no-net-info to skip."
 fi
-if [ "$NETWORK" = "1" ]; then
+if [ "$NETWORK" = "1" ] && [ "$VERBOSE" = "1" ]; then
   echo "Network sanity enabled: downloads 25 MB and uploads 10 MB of zero data to Cloudflare. No result upload."
 fi
 if [ "$NETWORK_PROFILE" = "full" ]; then
@@ -1028,7 +1032,8 @@ NETWORK_MODE="skipped (use --network)"
 [ "$NETWORK" = "1" ] && [ "$NETWORK_PROFILE" = "yabs" ] && NETWORK_MODE="Cloudflare HTTP sanity + YABS public iperf3 list"
 [ "$NETWORK" = "1" ] && [ -n "$IPERF_SERVER" ] && NETWORK_MODE="$NETWORK_MODE + iperf3($IPERF_SERVER)"
 
-cat <<EOF
+if [ "$VERBOSE" = "1" ]; then
+  cat <<EOF
 # ABS v$VERSION
 Profile  : $PROFILE ($PROFILE_TARGET)
 Date UTC : $(date -u)
@@ -1055,6 +1060,16 @@ Duration : ${D}s/timed test
 Tools    : sysbench=$(sysbench --version 2>/dev/null | awk '{print $2}' || echo no), fio=$([ -n "$FIO_BIN" ] && "$FIO_BIN" --version 2>/dev/null || echo no), python3=$(python3 --version 2>/dev/null | awk '{print $2}' || echo no), curl=$(curl --version 2>/dev/null | awk 'NR==1{print $2}' || echo no)
 Logs     : $LOGDIR
 EOF
+else
+  cat <<EOF
+# ABS v$VERSION — $PROFILE ($PROFILE_TARGET)
+Host     : $HOST | $VCPU vCPU | $RAM_TEXT RAM | $VM_TYPE
+CPU      : $CPU_MODEL
+Disk     : $(human_kib "$DISK_FREE_KB") free | fio $SIZE | ${D}s/test
+Network  : $NETWORK_MODE
+Logs     : $LOGDIR
+EOF
+fi
 
 printf '\n%-48s %s\n' "Metric" "Result"
 printf '%-48s %s\n' "------" "------"
