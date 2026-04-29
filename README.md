@@ -2,7 +2,7 @@
 
 ABS is a practical VPS decision benchmark: **one line in, keep/maybe/avoid out**.
 
-ABS is designed to finish fast, stay local-first by default, and explain whether a VPS is useful for ordinary workloads.
+ABS is designed to finish fast, include a short network sanity check by default, and explain whether a VPS is useful for ordinary workloads.
 
 ## Quick start
 
@@ -31,7 +31,7 @@ curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash -
 Fuller comparison run:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash -s -- --full -z 8G --network --json
+curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash -s -- --full -z 8G --json
 ```
 
 ## Design target
@@ -57,12 +57,12 @@ Default ABS intentionally runs shorter than YABS. It favors useful signal over e
 | Disk pressure | `fio` 4K random read/write/mixed with capped jobs and queue depth 32 |
 | Durable write | `fio` 4K random write with `fsync=1`, including sync p95 when fio reports it |
 | Fallback disk | small `dd` sequential fallback if fio is unavailable; not scored |
-| Optional network | `--network` runs a short Cloudflare HTTP sanity check and prints a separate network sanity score: about 25 MB download plus 10 MB zero-data upload; not a rigorous iperf replacement |
+| Network sanity | default Cloudflare HTTP check with separate network sanity score: about 25 MB download plus 10 MB zero-data upload; `--no-network` skips it |
 | ABS score/verdict | internal local score plus `KEEP` / `MAYBE` / `AVOID` / `INCOMPLETE` verdict; network is shown separately |
 
 ## Score and verdict
 
-ABS score is **not Geekbench** and **not YABS-compatible**. It is an internal same-tool convenience score for local CPU, memory, and disk. Network is excluded from the ABS score and shown separately when `--network` is used.
+ABS score is **not Geekbench** and **not YABS-compatible**. It is an internal same-tool convenience score for local CPU, memory, and disk. Network is reported as a separate sanity score, not mixed into ABS score.
 
 Rough weighting:
 
@@ -91,7 +91,8 @@ That avoids misleading screenshots when fio or sysbench is missing. ABS also add
 -n, --no-install     do not install missing packages
 --net-info           check IPv4/IPv6 and external IP/ASN
 --no-net-info        skip external IP/ASN lookup (default)
---network            run optional Cloudflare HTTP network sanity test
+--network            run Cloudflare HTTP network sanity test (default)
+--no-network         skip network speed sanity test
 --json               print JSON result at the end
 --json-file PATH     write JSON result to PATH as well as logdir
 -h, --help           help
@@ -117,11 +118,10 @@ Use `--json-file result.json` to copy JSON somewhere specific.
 ## Privacy and mutation
 
 - No automatic result upload.
-- Default mode may install `sysbench`, `fio`, `python3`, and small distro support packages if missing. `curl` is installed only when `--net-info` or `--network` needs it.
+- Default mode may install `sysbench`, `fio`, `python3`, `curl`, and small distro support packages if missing.
 - Use `-n` / `--no-install` to skip package installation entirely.
-- Default mode does not call network endpoints for identity or speed tests.
+- Default mode calls Cloudflare speed endpoints for a short HTTP network sanity check; use `--no-network` to skip it.
 - `--net-info` calls external endpoints for IPv4/IPv6 and IP/ASN lookup.
-- `--network` calls Cloudflare speed endpoints for a short HTTP sanity check.
 - Disk tests create temporary files in `.abs`, then remove them.
 
 ## License

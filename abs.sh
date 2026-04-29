@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 export LC_ALL=C
 
-VERSION="0.4.1"
+VERSION="0.4.2"
 TIME_START_EPOCH="$(date +%s)"
 TIME_START_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 VCPU="$(nproc 2>/dev/null || echo 1)"
@@ -19,7 +19,7 @@ JOBS_ENV="${JOBS-}"
 DEPTH="${DEPTH:-32}"
 INSTALL="${INSTALL:-1}"
 NET_INFO="${NET_INFO:-0}"
-NETWORK="${NETWORK:-0}"
+NETWORK="${NETWORK:-1}"
 JSON_PRINT="${JSON_PRINT:-0}"
 JSON_FILE="${JSON_FILE:-}"
 LOGDIR="${LOGDIR:-/tmp/abs-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
@@ -45,7 +45,7 @@ One-line run:
   curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash
   wget -qO- https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash
 
-Default profile targets under 3 minutes. ABS is local-first: network checks are opt-in, no result upload.
+Default profile targets under 3 minutes and includes a short network sanity check. No result upload.
 
 Options:
   --quick              ~60s smoke profile
@@ -56,7 +56,8 @@ Options:
   -n, --no-install     do not install missing packages
   --net-info           check IPv4/IPv6 and external IP/ASN
   --no-net-info        skip external IP/ASN lookup (default)
-  --network            run optional Cloudflare HTTP network sanity test
+  --network            run Cloudflare HTTP network sanity test (default)
+  --no-network         skip network speed sanity test
   --json               print JSON result at the end
   --json-file PATH     write JSON result to PATH as well as logdir
   -h, --help           help
@@ -64,7 +65,7 @@ Options:
 Examples:
   curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash
   curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash -s -- --quick -n
-  curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash -s -- --full -z 8G --network --json
+  curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash -s -- --full -z 8G --json
 
 Env overrides also work: PROFILE=full SIZE=8G INSTALL=0 bash abs.sh
 EOF
@@ -92,6 +93,7 @@ while [ "$#" -gt 0 ]; do
     --net-info) NET_INFO=1 ;;
     --no-net-info) NET_INFO=0 ;;
     --network) NETWORK=1 ;;
+    --no-network) NETWORK=0 ;;
     --json) JSON_PRINT=1 ;;
     --json-file)
       shift; [ "$#" -gt 0 ] || { echo "Missing value for --json-file" >&2; exit 2; }
@@ -973,7 +975,7 @@ else
   add "ABS verdict" "$VERDICT_TEXT"
 fi
 add_note "Score note" "ABS local score excludes network. FULL requires CPU, memory, disk QD1, and fsync; PARTIAL is not comparable."
-add_note "Privacy note" "No result upload. Identity/speed checks are off by default; package install may contact distro mirrors unless -n is used. --net-info calls IP/ASN endpoints; --network uses Cloudflare."
+add_note "Privacy note" "No result upload. Default network sanity uses Cloudflare (25 MB down, 10 MB zero-data up); package install may contact distro mirrors unless -n is used. --net-info calls IP/ASN endpoints; --no-network skips speed checks."
 
 ELAPSED_SECONDS=$(( $(date +%s) - TIME_START_EPOCH ))
 if have python3; then
