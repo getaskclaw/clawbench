@@ -12,6 +12,12 @@ Do not trust VPS plan labels alone. A **6 vCPU / 16 GB RAM** VPS can be much wor
 
 That is the point of ABS: measure CPU, memory, disk latency/fsync, and network sanity before deciding whether a VPS is actually worth keeping.
 
+Example: these two real ABS runs show a **6 vCPU / 16 GB** VPS scoring much worse than a **3 vCPU / 12 GB** VPS.
+
+| 6 vCPU / 16 GB: MAYBE | 3 vCPU / 12 GB: KEEP |
+|---|---|
+| ![ABS result: 6 vCPU 16GB VPS scored MAYBE](assets/abs-six225-6vcpu-maybe.jpg) | ![ABS result: 3 vCPU 12GB VPS scored KEEP](assets/abs-to6427-3vcpu-keep.jpg) |
+
 ## Run
 
 ```bash
