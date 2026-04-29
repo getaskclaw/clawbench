@@ -1,37 +1,38 @@
-# ClawBench
+# ABS — AskClaw Benchmark Script
 
-A small YABS-style VPS benchmark from AskClaw.
+A small YABS-style VPS benchmark: **one line in, results out**.
 
-ClawBench is for quick VPS sanity checks and provider comparisons when you want:
+ABS is for quick VPS sanity checks and provider comparisons when you want:
 
-- one-line run, readable results immediately,
-- CPU and memory via `sysbench`,
+- a one-line command like YABS,
+- readable terminal results immediately,
+- CPU and memory tests via `sysbench`,
 - disk throughput/IOPS/latency via `fio`,
-- conservative auto sizing that cleans up after itself,
+- conservative auto sizing and cleanup,
 - clear disclosure of benchmark mode and logs.
 
 ## Quick start
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/getaskclaw/clawbench/main/bin/clawbench.sh | bash
+curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash
 ```
 
 With `wget`:
 
 ```bash
-wget -qO- https://raw.githubusercontent.com/getaskclaw/clawbench/main/bin/clawbench.sh | bash
+wget -qO- https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash
 ```
 
 No-install mode:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/getaskclaw/clawbench/main/bin/clawbench.sh | bash -s -- -n
+curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash -s -- -n
 ```
 
 Explicit comparison run:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/getaskclaw/clawbench/main/bin/clawbench.sh | bash -s -- -d 60 -z 8G -t 3
+curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash -s -- -d 60 -z 8G -t 3
 ```
 
 ## What it measures
@@ -46,7 +47,7 @@ curl -fsSL https://raw.githubusercontent.com/getaskclaw/clawbench/main/bin/clawb
 | Disk pressure | `fio` 4K random read/write/mixed with capped jobs and queue depth 32 |
 | Durable write | `fio` 4K random write with `fsync=1`, including sync p95 when fio reports it |
 
-ClawBench intentionally does **not** run Geekbench, Cloudflare speed tests, iperf, OpenSSL speed, or stress-ng. Keep the core signal clean.
+ABS intentionally does **not** run Geekbench, Cloudflare speed tests, iperf, OpenSSL speed, or stress-ng. Keep the core signal clean.
 
 ## Auto defaults
 
@@ -71,33 +72,33 @@ The default command should be enough for most users.
 Environment overrides also work:
 
 ```bash
-D=60 SIZE=8G T=3 INSTALL=0 bash clawbench.sh
+D=60 SIZE=8G T=3 INSTALL=0 bash abs.sh
 ```
 
 Advanced fio overrides:
 
 ```bash
-DIRECT=0 FIO_ENGINE=psync bash clawbench.sh
+DIRECT=0 FIO_ENGINE=psync bash abs.sh
 ```
 
 ## Output
 
-ClawBench prints a table directly and writes full logs plus a TSV summary under `/tmp/clawbench-*`.
+ABS prints a table directly and writes full logs plus a TSV summary under `/tmp/abs-*`.
 
 Example header:
 
 ```text
-# Clawbench v0.6.0
+# ABS v0.1.0
 vCPU     : 3
 Threads  : 3
 Fio size : 4G
 Mode     : install=1, direct=1, fio_engine=libaio, pressure_jobs=3, pressure_depth=32
-Logs     : /tmp/clawbench-...
+Logs     : /tmp/abs-...
 ```
 
 ## Interpreting results
 
-Use ClawBench for relative comparisons with the same command and similar time of day. VPS performance is noisy: neighbors, throttling, CPU generation, storage cache, kernel, and region all matter.
+Use ABS for relative comparisons with the same command and similar time of day. VPS performance is noisy: neighbors, throttling, CPU generation, storage cache, kernel, and region all matter.
 
 Most useful lines for ordinary VPS workloads:
 
@@ -107,13 +108,9 @@ Most useful lines for ordinary VPS workloads:
 - `Disk random mixed 4K 60r/40w`
 - `Disk durable write 4K fsync`
 
-## Python legacy script
-
-`bin/clawbench.py` is kept as a Python stdlib-only lightweight inventory/check script. The primary one-line benchmark is now `bin/clawbench.sh`.
-
 ## Safety
 
-- Creates one temporary fio file in `.clawbench`, then removes it.
+- Creates one temporary fio file in `.abs`, then removes it.
 - With default install mode, may install `sysbench`, `fio`, `python3`, and small distro support packages such as `ca-certificates`/`procps`; yum systems may also install `epel-release`.
 - Use `-n` to skip package installation entirely.
 - Does not run network speed tests.

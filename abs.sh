@@ -2,22 +2,22 @@
 set -Eeuo pipefail
 export LC_ALL=C
 
-VERSION="0.6.0"
+VERSION="0.1.0"
 VCPU="$(nproc 2>/dev/null || echo 1)"
 D="${D:-30}"                                # seconds per timed test
 T="${T:-$VCPU}"                             # CPU/memory benchmark threads
 SIZE="${SIZE:-auto}"                        # fio test file size; auto-detected unless set
-DIR="${DIR:-$PWD/.clawbench}"               # disk test location
+DIR="${DIR:-$PWD/.abs}"                      # disk test location
 CPU_PRIME="${CPU_PRIME:-20000}"
 DIRECT="${DIRECT:-1}"                       # set DIRECT=0 if direct I/O fails
 FIO_ENGINE="${FIO_ENGINE:-libaio}"          # try FIO_ENGINE=psync if libaio fails
 JOBS_ENV="${JOBS-}"                         # optional pressure random I/O jobs
 DEPTH="${DEPTH:-32}"                        # pressure random I/O queue depth
 INSTALL="${INSTALL:-1}"                     # default: one-line run installs missing tools
-LOGDIR="${LOGDIR:-/tmp/clawbench-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+LOGDIR="${LOGDIR:-/tmp/abs-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 
 RESULTS="$LOGDIR/results.tsv"
-FIO_FILE="$DIR/clawbench.test"
+FIO_FILE="$DIR/abs.test"
 FIO_BIN=""
 JOBS=""
 LAST_LOG=""
@@ -25,14 +25,14 @@ LAST_JSON=""
 
 usage() {
   cat <<EOF
-Clawbench v$VERSION — simple VPS benchmark
+ABS v$VERSION — AskClaw Benchmark Script
 
 One-line run after hosting:
-  curl -fsSL <URL>/bin/clawbench.sh | bash
-  wget -qO- <URL>/bin/clawbench.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash
+  wget -qO- https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash
 
 Explicit overrides:
-  curl -fsSL <URL>/bin/clawbench.sh | bash -s -- -d 60 -z 8G -t 3
+  curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash -s -- -d 60 -z 8G -t 3
 
 Options:
   -d SECONDS   seconds per timed test   default: $D
@@ -41,7 +41,7 @@ Options:
   -n           no install; skip missing tools
   -h           help
 
-Env overrides also work: D=60 SIZE=8G T=3 INSTALL=0 bash clawbench.sh
+Env overrides also work: D=60 SIZE=8G T=3 INSTALL=0 bash abs.sh
 EOF
 }
 
@@ -321,7 +321,7 @@ install_tools
 have_fio || true
 
 cat <<EOF
-# Clawbench v$VERSION
+# ABS v$VERSION
 Date UTC : $(date -u)
 Host     : $(hostname 2>/dev/null || true)
 Kernel   : $(uname -srmo)
