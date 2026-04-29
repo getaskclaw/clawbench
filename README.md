@@ -1,34 +1,63 @@
 # ABS — AskClaw Benchmark Script
 
-ABS is a practical VPS benchmark: **one command, quick result, keep/maybe/avoid verdict**.
+ABS is a quick VPS benchmark that ends with a simple verdict:
 
-It is not a YABS clone. YABS answers “how fast is this box?”
+```text
+KEEP / MAYBE / AVOID / INCOMPLETE
+```
 
-ABS tries to answer: **“should I keep this VPS?”**
+It helps answer one question:
 
-## Specs are not performance
+> **Should I keep this VPS?**
 
-Do not trust VPS plan labels alone. A **6 vCPU / 16 GB RAM** VPS can be much worse than a **3 vCPU / 12 GB RAM** VPS if the larger plan has weaker shared CPU, slower storage, worse noisy-neighbor pressure, or poorer network routing.
-
-That is the point of ABS: measure CPU, memory, disk latency/fsync, and network sanity before deciding whether a VPS is actually worth keeping.
-
-Example: these two real ABS runs show a **6 vCPU / 16 GB** VPS scoring much worse than a **3 vCPU / 12 GB** VPS.
-
-| 6 vCPU / 16 GB: MAYBE | 3 vCPU / 12 GB: KEEP |
-|---|---|
-| ![ABS result: 6 vCPU 16GB VPS scored MAYBE](assets/abs-six225-6vcpu-maybe.jpg) | ![ABS result: 3 vCPU 12GB VPS scored KEEP](assets/abs-to6427-3vcpu-keep.jpg) |
-
-## Run
+## Run it
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash
 ```
 
-That runs the default benchmark: CPU, memory, disk, fsync, and a short Cloudflare network sanity check.
+Default run:
 
-Default target: **under 3 minutes**, excluding package install time.
+- takes about **under 3 minutes** after dependencies are installed
+- may install missing tools: `sysbench`, `fio`, `python3`, `curl`
+- tests CPU, memory, disk, fsync, and a short Cloudflare network sanity check
+- uploads **nothing**
 
-## Common modes
+## Read the result
+
+At the end, look for this block:
+
+```text
+==================== ABS RESULT ====================
+SCORE   : FULL 2624 (80% local + 20% network; local 2771, network 2038)
+VERDICT : KEEP - practical VPS profile looks acceptable
+LOCAL   : FULL 2771 (local only: cpu,mem,disk,fsync; network excluded)
+NETWORK : SANITY 2038 (Cloudflare HTTP; included in ABS score)
+====================================================
+```
+
+Meaning:
+
+- **KEEP** — looks good for practical VPS use
+- **MAYBE** — usable, but has weaknesses or depends on price/location
+- **AVOID** — weak result; probably not worth keeping
+- **INCOMPLETE** — important tests failed or were skipped
+
+If you see `PARTIAL - not comparable`, do not compare that score with full runs. Usually `fio`, `python3`, or network access was missing.
+
+## Bigger specs can be worse
+
+Do not trust VPS plan labels alone.
+
+A **6 vCPU / 16 GB RAM** VPS can be much worse than a **3 vCPU / 12 GB RAM** VPS because providers differ in CPU sharing, storage latency, noisy neighbors, and routing.
+
+Real ABS example:
+
+| 6 vCPU / 16 GB: MAYBE | 3 vCPU / 12 GB: KEEP |
+|---|---|
+| ![ABS result: 6 vCPU 16GB VPS scored MAYBE](assets/abs-six225-6vcpu-maybe.jpg) | ![ABS result: 3 vCPU 12GB VPS scored KEEP](assets/abs-to6427-3vcpu-keep.jpg) |
+
+## Common commands
 
 ```bash
 # normal run
@@ -40,58 +69,43 @@ curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash -
 # stronger local test
 curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash -s -- --full
 
+# no package installation
+curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash -s -- -n
+
+# skip network checks
+curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash -s -- --no-network
+
 # stronger network test: Cloudflare + 3 public iperf3 regions
 curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash -s -- --network-full
 
-# YABS-style network mode: Cloudflare + current YABS public iperf3 list
+# YABS-style network list
 curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash -s -- --network-yabs
-
-# no package install
-curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash -s -- -n
 ```
 
 ## China / restricted DNS fallback
 
-Some VPSes, especially in China, cannot resolve `raw.githubusercontent.com` or `cdn.jsdelivr.net`. If GitHub raw fails with `Could not resolve host`, this jsDelivr + pinned-IP fallback may work:
+If `raw.githubusercontent.com` or `cdn.jsdelivr.net` cannot resolve, try:
 
 ```bash
 curl --resolve cdn.jsdelivr.net:443:104.16.175.226 \
   -fsSL https://cdn.jsdelivr.net/gh/getaskclaw/abs@main/abs.sh | bash -s -- -n
 ```
 
-`-n` / `--no-install` skips package installation. This is useful when package managers hang on broken or slow mirrors. If `fio` is missing, ABS will fall back to limited disk checks and the score may be partial.
+This uses `-n` / `--no-install` to avoid hanging on broken or slow package mirrors.
+
+Warning: if `fio` or `python3` is missing, disk/fsync will be skipped and the score may be partial.
 
 ## What ABS measures
 
-- CPU: sysbench single-thread and all-thread throughput
-- Memory: sysbench read/write throughput
-- Disk: fio sequential and 4K random tests
-- Durable write: fio 4K fsync test
-- Network: Cloudflare HTTP sanity check by default
-- Optional network: public iperf3 via `--network-full` or `--network-yabs`
+- **CPU** — sysbench single-thread and all-thread throughput
+- **Memory** — sysbench read/write throughput
+- **Disk** — fio sequential and 4K random tests
+- **Durable write** — fio 4K fsync test
+- **Network** — Cloudflare HTTP sanity check by default
 
-If fio is missing and cannot be installed, ABS falls back to a small `dd` disk sanity check, but `dd` is **not scored**.
+If `fio` is missing, ABS may run a small `dd` disk fallback. That fallback is only a rough sanity check and is **not scored**.
 
-## Score
-
-ABS now prints a clear result block at the end:
-
-```text
-==================== ABS RESULT ====================
-SCORE   : FULL ...
-VERDICT : KEEP ...
-LOCAL   : FULL ...
-NETWORK : SANITY/FULL ...
-====================================================
-```
-
-It also keeps the component lines in the table:
-
-```text
-ABS SCORE          FULL ...
-Local component    FULL ...
-Network component  SANITY/FULL ...
-```
+## Score formula
 
 Headline score:
 
@@ -99,24 +113,11 @@ Headline score:
 80% local CPU/memory/disk/fsync + 20% network
 ```
 
-A score is `PARTIAL - not comparable` if required sections are missing or skipped.
+ABS also prints separate local and network components so you can see what helped or hurt the result.
 
-Public iperf3 servers are useful but noisy. They can be busy, overloaded, or routing-dependent. Use them as rough route evidence, not perfect truth.
+Network is useful but noisy. Cloudflare and public iperf3 results depend on routing, location, and server load.
 
-## Verdict
-
-ABS prints one of:
-
-```text
-KEEP
-MAYBE
-AVOID
-INCOMPLETE
-```
-
-The verdict is meant for practical VPS decisions. It may warn about OpenVZ/container storage or suspiciously high cached disk results.
-
-## Options
+## Useful options
 
 ```text
 --quick              ~60s smoke profile
@@ -139,23 +140,24 @@ The verdict is meant for practical VPS decisions. It may warn about OpenVZ/conta
 -h, --help           help
 ```
 
-## Privacy and mutation
+## Privacy and files
 
-- No benchmark result upload.
-- Default network check uses Cloudflare: about 25 MB download and 10 MB zero-data upload.
-- `--network-full` and `--network-yabs` call public iperf3 servers.
-- `--net-info` calls external IP/ASN endpoints.
-- Default mode may install missing tools (`sysbench`, `fio`, `python3`, `curl`, and sometimes `iperf3`).
-- Use `-n` to avoid package installation.
-- Disk tests create temporary files in `.abs`, then remove them.
+ABS does **not** upload benchmark results.
 
-## Output files
+External calls:
 
-ABS writes local artifacts under `/tmp/abs-*`:
+- default network check uses Cloudflare: about 25 MB download and 10 MB zero-data upload
+- `--network-full` and `--network-yabs` call public iperf3 servers
+- `--net-info` calls external IP/ASN endpoints
+- default install mode may contact distro package mirrors
+
+Local output is saved under `/tmp/abs-*`:
 
 - `results.tsv`
 - `result.json`
-- raw tool logs
+- raw logs
+
+Disk test files are temporary and removed after the run.
 
 ## License
 
