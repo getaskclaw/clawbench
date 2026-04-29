@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 export LC_ALL=C
 
-VERSION="0.4.0"
+VERSION="0.4.1"
 TIME_START_EPOCH="$(date +%s)"
 TIME_START_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 VCPU="$(nproc 2>/dev/null || echo 1)"
@@ -32,6 +32,7 @@ JOBS=""
 LAST_LOG=""
 LAST_JSON=""
 SCORE_TEXT="n/a"
+NETWORK_SCORE_TEXT="skipped"
 VERDICT_TEXT="n/a"
 INSTALL_ATTEMPTED="0"
 MISSING_AFTER_INSTALL=""
@@ -483,10 +484,55 @@ else:
 PY
 }
 
-abs_verdict() {
-  python3 - "$SCORE_TEXT" "$RESULTS" <<'PY'
+network_score() {
+  if [ "$NETWORK" != "1" ]; then
+    printf 'skipped; use --network'
+    return 0
+  fi
+  python3 - "$RESULTS" <<'PY'
 import csv, re, sys
-score_text, results = sys.argv[1], sys.argv[2]
+rows = {}
+try:
+    with open(sys.argv[1], newline='', encoding='utf-8', errors='replace') as f:
+        for row in csv.reader(f, delimiter='\t'):
+            if len(row) >= 2 and row[0] != 'Metric':
+                rows[row[0]] = row[1]
+except Exception:
+    print('n/a')
+    raise SystemExit
+
+def first_num(prefix):
+    for k, v in rows.items():
+        if k.startswith(prefix):
+            low = (v or '').lower()
+            if any(w in low for w in ('failed', 'skipped', 'not installed')):
+                return None
+            m = re.search(r'[0-9]+(?:\.[0-9]+)?', v)
+            return float(m.group(0)) if m else None
+    return None
+lat = first_num('Network Cloudflare TTFB')
+down = first_num('Network Cloudflare download')
+up = first_num('Network Cloudflare upload')
+missing = []
+if lat is None: missing.append('ttfb')
+if down is None: missing.append('download')
+if up is None: missing.append('upload')
+if missing:
+    print('PARTIAL - not comparable: missing ' + ','.join(missing))
+    raise SystemExit
+# Sanity score only: Cloudflare HTTP path, not a rigorous iperf/network benchmark.
+lat_component = min(3.0, max(0.1, 100.0 / max(lat, 1.0)))
+down_component = min(3.0, max(0.1, down / 100.0))
+up_component = min(3.0, max(0.1, up / 50.0))
+score = round(1000 * (lat_component * down_component * up_component) ** (1/3))
+print(f'SANITY {score} (Cloudflare HTTP; not in ABS local score)')
+PY
+}
+
+abs_verdict() {
+  python3 - "$SCORE_TEXT" "$RESULTS" "$VM_TYPE" <<'PY'
+import csv, re, sys
+score_text, results, vm_type = sys.argv[1], sys.argv[2], (sys.argv[3] or '').lower()
 if score_text.startswith('PARTIAL') or score_text == 'n/a':
     print('INCOMPLETE - missing required benchmark sections')
     raise SystemExit
@@ -507,6 +553,7 @@ def num(prefix):
             return float(mm.group(0)) if mm else None
     return None
 fsync = num('Disk durable write 4K fsync')
+qd1_write = num('Disk random write 4K QD1')
 if score >= 1200:
     verdict = 'KEEP'
 elif score >= 800:
@@ -516,6 +563,10 @@ else:
 why = []
 if fsync is not None and fsync < 500:
     why.append('weak durable-write/fsync')
+if 'openvz' in vm_type:
+    why.append('OpenVZ/container storage can be cache-inflated')
+if (qd1_write is not None and qd1_write > 100000) or (fsync is not None and fsync > 8000):
+    why.append('very high write/fsync numbers; verify with --full before buying')
 if why:
     print(f'{verdict} - {"; ".join(why)}')
 else:
@@ -644,7 +695,7 @@ json_report() {
   ABS_THREADS="$T" ABS_DURATION="$D" ABS_SIZE="$SIZE" ABS_INSTALL="$INSTALL" ABS_INSTALL_ATTEMPTED="$INSTALL_ATTEMPTED" \
   ABS_NET_INFO="$NET_INFO" ABS_NETWORK="$NETWORK" \
   ABS_MISSING_TOOLS="$MISSING_AFTER_INSTALL" ABS_DIRECT="$DIRECT" ABS_FIO_ENGINE="$FIO_ENGINE" \
-  ABS_JOBS="$JOBS" ABS_DEPTH="$DEPTH" ABS_SCORE="$SCORE_TEXT" ABS_VERDICT="$VERDICT_TEXT" \
+  ABS_JOBS="$JOBS" ABS_DEPTH="$DEPTH" ABS_SCORE="$SCORE_TEXT" ABS_NETWORK_SCORE="$NETWORK_SCORE_TEXT" ABS_VERDICT="$VERDICT_TEXT" \
   python3 - "$RESULTS" <<'PY'
 import csv, json, os, re, shutil, sys
 results_path = sys.argv[1]
@@ -678,6 +729,7 @@ elif score_text.startswith('PARTIAL'):
     mm = re.search(r'missing ([^)]+)\)', score_text)
     if mm: missing_components = [x for x in mm.group(1).split(',') if x]
 verdict_text = env('ABS_VERDICT')
+network_score_text = env('ABS_NETWORK_SCORE')
 verdict_code = verdict_text.split(' ', 1)[0] if verdict_text else 'UNKNOWN'
 verdict_reason = verdict_text.split(' - ', 1)[1] if ' - ' in verdict_text else verdict_text
 out = {
@@ -710,6 +762,7 @@ out = {
         'comparable': score_status == 'full',
         'missing_components': missing_components,
     },
+    'network_score': {'text': network_score_text, 'included_in_local_score': False},
     'verdict': {'text': verdict_text, 'code': verdict_code, 'reason': verdict_reason},
     'results': rows,
 }
@@ -764,6 +817,8 @@ VM_TYPE="$(systemd-detect-virt 2>/dev/null || echo unknown)"
 IPV4_STATUS="$(check_ip 4)"
 IPV6_STATUS="$(check_ip 6)"
 IP_INFO="$(ip_info_summary)"
+NETWORK_MODE="skipped (use --network)"
+[ "$NETWORK" = "1" ] && NETWORK_MODE="Cloudflare HTTP sanity"
 
 cat <<EOF
 # ABS v$VERSION
@@ -785,6 +840,7 @@ Disk     : $DISK_TEXT on $DIR
 VM Type  : $VM_TYPE
 IPv4/IPv6: $IPV4_STATUS / $IPV6_STATUS
 IP info  : $IP_INFO
+Network  : $NETWORK_MODE
 Fio size : $SIZE
 Mode     : install=$INSTALL, direct=$DIRECT, fio_engine=$FIO_ENGINE, pressure_jobs=$JOBS, pressure_depth=$DEPTH, net_info=$NET_INFO, network=$NETWORK
 Duration : ${D}s/timed test
@@ -904,15 +960,19 @@ network_sanity
 if have python3; then
   SCORE_TEXT="$(abs_score)"
   add "ABS score" "$SCORE_TEXT"
+  NETWORK_SCORE_TEXT="$(network_score)"
+  add "Network score" "$NETWORK_SCORE_TEXT"
   VERDICT_TEXT="$(abs_verdict)"
   add "ABS verdict" "$VERDICT_TEXT"
 else
   SCORE_TEXT="n/a (python3 missing)"
+  NETWORK_SCORE_TEXT="n/a (python3 missing)"
   VERDICT_TEXT="INCOMPLETE - python3 missing"
   add "ABS score" "$SCORE_TEXT"
+  add "Network score" "$NETWORK_SCORE_TEXT"
   add "ABS verdict" "$VERDICT_TEXT"
 fi
-add_note "Score note" "FULL scores require CPU, memory, disk QD1, and fsync. PARTIAL is not comparable."
+add_note "Score note" "ABS local score excludes network. FULL requires CPU, memory, disk QD1, and fsync; PARTIAL is not comparable."
 add_note "Privacy note" "No result upload. Identity/speed checks are off by default; package install may contact distro mirrors unless -n is used. --net-info calls IP/ASN endpoints; --network uses Cloudflare."
 
 ELAPSED_SECONDS=$(( $(date +%s) - TIME_START_EPOCH ))

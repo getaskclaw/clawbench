@@ -57,12 +57,12 @@ Default ABS intentionally runs shorter than YABS. It favors useful signal over e
 | Disk pressure | `fio` 4K random read/write/mixed with capped jobs and queue depth 32 |
 | Durable write | `fio` 4K random write with `fsync=1`, including sync p95 when fio reports it |
 | Fallback disk | small `dd` sequential fallback if fio is unavailable; not scored |
-| Optional network | `--network` runs a short Cloudflare HTTP sanity check: about 25 MB download plus 10 MB zero-data upload; not a rigorous iperf replacement |
-| ABS score/verdict | internal score plus `KEEP` / `MAYBE` / `AVOID` / `INCOMPLETE` verdict |
+| Optional network | `--network` runs a short Cloudflare HTTP sanity check and prints a separate network sanity score: about 25 MB download plus 10 MB zero-data upload; not a rigorous iperf replacement |
+| ABS score/verdict | internal local score plus `KEEP` / `MAYBE` / `AVOID` / `INCOMPLETE` verdict; network is shown separately |
 
 ## Score and verdict
 
-ABS score is **not Geekbench** and **not YABS-compatible**. It is an internal same-tool convenience score.
+ABS score is **not Geekbench** and **not YABS-compatible**. It is an internal same-tool convenience score for local CPU, memory, and disk. Network is excluded from the ABS score and shown separately when `--network` is used.
 
 Rough weighting:
 
@@ -78,7 +78,7 @@ PARTIAL - not comparable
 ABS verdict: INCOMPLETE
 ```
 
-That avoids misleading screenshots when fio or sysbench is missing.
+That avoids misleading screenshots when fio or sysbench is missing. ABS also adds caution text when OpenVZ/container-like storage or extremely high write/fsync numbers may be cache-inflated.
 
 ## Options
 
