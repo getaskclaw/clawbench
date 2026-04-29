@@ -58,7 +58,7 @@ Default ABS intentionally runs shorter than YABS. It favors useful signal over e
 | Durable write | `fio` 4K random write with `fsync=1`, including sync p95 when fio reports it |
 | Fallback disk | small `dd` sequential fallback if fio is unavailable; not scored |
 | Network sanity | default Cloudflare HTTP check: about 25 MB download plus 10 MB zero-data upload; `--no-network` skips it |
-| Optional iperf3 | `--iperf HOST[:PORT]` adds send/recv throughput against your own comparable iperf3 server |
+| Optional iperf3 | `--network-full` adds 3 short public regional iperf3 tests; `--network-yabs` uses the full YABS public list; `--iperf HOST[:PORT]` adds your own server |
 | ABS score/verdict | internal same-tool score plus `KEEP` / `MAYBE` / `AVOID` / `INCOMPLETE` verdict; default score includes network |
 
 ## Score and verdict
@@ -82,7 +82,11 @@ Rough weighting:
   - 15% durable write: fio 4K fsync writes/s
 - 20% network component:
   - default Cloudflare HTTP TTFB/download/upload sanity
+  - `--network-full`: Cloudflare plus Singapore/London/NYC public iperf3
+  - `--network-yabs`: Cloudflare plus the full YABS public iperf3 list
   - optional `--iperf HOST[:PORT]` blended into the network component when provided
+
+Public iperf3 servers are noisy and sometimes busy. Use them for rough route evidence, not as a perfect truth source.
 
 A full score requires CPU, memory, disk QD1, fsync, and network. If any required section is missing, ABS prints:
 
@@ -105,6 +109,8 @@ That avoids misleading screenshots when fio or sysbench is missing. ABS also add
 --net-info           check IPv4/IPv6 and external IP/ASN
 --no-net-info        skip external IP/ASN lookup (default)
 --network            run Cloudflare HTTP network sanity test (default)
+--network-full       Cloudflare + 3 public iperf3 regions
+--network-yabs       Cloudflare + full YABS public iperf3 list
 --no-network         skip network speed sanity test
 --iperf HOST[:PORT]  optional iperf3 send/recv against your own server
 --json               print JSON result at the end
@@ -135,6 +141,7 @@ Use `--json-file result.json` to copy JSON somewhere specific.
 - Default mode may install `sysbench`, `fio`, `python3`, `curl`, and small distro support packages if missing.
 - Use `-n` / `--no-install` to skip package installation entirely.
 - Default mode calls Cloudflare speed endpoints for a short HTTP network sanity check; use `--no-network` to skip it, but the ABS score becomes partial/non-comparable.
+- `--network-full` calls three public iperf3 servers; `--network-yabs` calls the full YABS public iperf3 list.
 - `--iperf HOST[:PORT]` calls the iperf3 server you provide and folds that signal into the network component.
 - `--net-info` calls external endpoints for IPv4/IPv6 and IP/ASN lookup.
 - Disk tests create temporary files in `.abs`, then remove them.

@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 export LC_ALL=C
 
-VERSION="0.4.4"
+VERSION="0.4.5"
 TIME_START_EPOCH="$(date +%s)"
 TIME_START_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 VCPU="$(nproc 2>/dev/null || echo 1)"
@@ -20,8 +20,9 @@ DEPTH="${DEPTH:-32}"
 INSTALL="${INSTALL:-1}"
 NET_INFO="${NET_INFO:-0}"
 NETWORK="${NETWORK:-1}"
+NETWORK_PROFILE="${NETWORK_PROFILE:-cloudflare}"
 IPERF_SERVER="${IPERF_SERVER:-}"
-IPERF_TIME="${IPERF_TIME:-8}"
+IPERF_TIME="${IPERF_TIME:-5}"
 IPERF_PARALLEL="${IPERF_PARALLEL:-2}"
 JSON_PRINT="${JSON_PRINT:-0}"
 JSON_FILE="${JSON_FILE:-}"
@@ -61,6 +62,8 @@ Options:
   --net-info           check IPv4/IPv6 and external IP/ASN
   --no-net-info        skip external IP/ASN lookup (default)
   --network            run Cloudflare HTTP network sanity test (default)
+  --network-full       Cloudflare + 3 public iperf3 regions
+  --network-yabs       Cloudflare + full YABS public iperf3 list
   --no-network         skip network speed sanity test
   --iperf HOST[:PORT]  optional iperf3 send/recv against your own server
   --json               print JSON result at the end
@@ -97,8 +100,10 @@ while [ "$#" -gt 0 ]; do
     -n|--no-install) INSTALL=0 ;;
     --net-info) NET_INFO=1 ;;
     --no-net-info) NET_INFO=0 ;;
-    --network) NETWORK=1 ;;
-    --no-network) NETWORK=0 ;;
+    --network) NETWORK=1; NETWORK_PROFILE="cloudflare" ;;
+    --network-full) NETWORK=1; NETWORK_PROFILE="full" ;;
+    --network-yabs) NETWORK=1; NETWORK_PROFILE="yabs" ;;
+    --no-network) NETWORK=0; NETWORK_PROFILE="none" ;;
     --iperf)
       shift; [ "$#" -gt 0 ] || { echo "Missing value for --iperf" >&2; exit 2; }
       IPERF_SERVER="$1"; NETWORK=1 ;;
@@ -137,6 +142,7 @@ if ! is_pos_int "$IPERF_TIME"; then echo "Invalid IPERF_TIME: $IPERF_TIME" >&2; 
 if ! is_pos_int "$IPERF_PARALLEL"; then echo "Invalid IPERF_PARALLEL: $IPERF_PARALLEL" >&2; exit 2; fi
 if [ "$NET_INFO" != "0" ] && [ "$NET_INFO" != "1" ]; then echo "Invalid NET_INFO: $NET_INFO" >&2; exit 2; fi
 if [ "$NETWORK" != "0" ] && [ "$NETWORK" != "1" ]; then echo "Invalid NETWORK: $NETWORK" >&2; exit 2; fi
+case "$NETWORK_PROFILE" in cloudflare|full|yabs|none) ;; *) echo "Invalid NETWORK_PROFILE: $NETWORK_PROFILE" >&2; exit 2 ;; esac
 
 if [ -n "$JOBS_ENV" ]; then
   JOBS="$JOBS_ENV"
@@ -223,7 +229,7 @@ missing_tools() {
   if [ "$NETWORK" = "1" ] || [ "$NET_INFO" = "1" ]; then
     have curl || missing+=(curl)
   fi
-  if [ -n "$IPERF_SERVER" ]; then
+  if [ "$NETWORK" = "1" ] && { [ -n "$IPERF_SERVER" ] || [ "$NETWORK_PROFILE" = "full" ] || [ "$NETWORK_PROFILE" = "yabs" ]; }; then
     have iperf3 || missing+=(iperf3)
   fi
   printf '%s\n' "${missing[@]}"
@@ -247,7 +253,7 @@ install_tools() {
   if [ "$NETWORK" = "1" ] || [ "$NET_INFO" = "1" ]; then
     curl_pkg="curl"
   fi
-  if [ -n "$IPERF_SERVER" ]; then
+  if [ "$NETWORK" = "1" ] && { [ -n "$IPERF_SERVER" ] || [ "$NETWORK_PROFILE" = "full" ] || [ "$NETWORK_PROFILE" = "yabs" ]; }; then
     iperf_pkg="iperf3"
   fi
 
@@ -507,8 +513,8 @@ network_score() {
     printf 'PARTIAL - not comparable: missing network (--no-network)'
     return 0
   fi
-  python3 - "$RESULTS" <<'PY'
-import csv, math, re, sys
+  NETWORK_PROFILE_IN="$NETWORK_PROFILE" IPERF_SERVER_IN="$IPERF_SERVER" python3 - "$RESULTS" <<'PY'
+import csv, math, os, re, statistics, sys
 rows = {}
 try:
     with open(sys.argv[1], newline='', encoding='utf-8', errors='replace') as f:
@@ -519,15 +525,27 @@ except Exception:
     print('n/a')
     raise SystemExit
 
+def parse_num(v):
+    low = (v or '').lower()
+    if any(w in low for w in ('failed', 'skipped', 'not installed', 'missing')):
+        return None
+    m = re.search(r'[0-9]+(?:\.[0-9]+)?', v or '')
+    return float(m.group(0)) if m else None
+
 def first_num(prefix):
     for k, v in rows.items():
         if k.startswith(prefix):
-            low = (v or '').lower()
-            if any(w in low for w in ('failed', 'skipped', 'not installed', 'missing')):
-                return None
-            m = re.search(r'[0-9]+(?:\.[0-9]+)?', v)
-            return float(m.group(0)) if m else None
+            return parse_num(v)
     return None
+
+def nums(prefix):
+    out = []
+    for k, v in rows.items():
+        if k.startswith(prefix):
+            n = parse_num(v)
+            if n is not None:
+                out.append(n)
+    return out
 
 lat = first_num('Network Cloudflare TTFB')
 down = first_num('Network Cloudflare download')
@@ -545,25 +563,42 @@ down_component = min(3.0, max(0.1, down / 100.0))
 up_component = min(3.0, max(0.1, up / 50.0))
 cf_score = round(1000 * (lat_component * down_component * up_component) ** (1/3))
 
-iperf_send = first_num('Network iperf3 send')
-iperf_recv = first_num('Network iperf3 recv')
-if iperf_send is not None and iperf_recv is not None:
-    send_component = min(3.0, max(0.1, iperf_send / 500.0))
-    recv_component = min(3.0, max(0.1, iperf_recv / 500.0))
+send_vals = nums('Network iperf3 send')
+recv_vals = nums('Network iperf3 recv')
+profile = os.environ.get('NETWORK_PROFILE_IN', 'cloudflare')
+custom = bool(os.environ.get('IPERF_SERVER_IN', ''))
+expected = {'full': 3, 'yabs': 7}.get(profile, 0) + (1 if custom else 0)
+requires_iperf = expected > 0
+
+if send_vals and recv_vals and (not requires_iperf or (len(send_vals) >= expected and len(recv_vals) >= expected)):
+    send = statistics.median(send_vals)
+    recv = statistics.median(recv_vals)
+    send_component = min(3.0, max(0.1, send / 500.0))
+    recv_component = min(3.0, max(0.1, recv / 500.0))
     iperf_score = round(1000 * math.sqrt(send_component * recv_component))
     score = round(cf_score * 0.6 + iperf_score * 0.4)
-    print(f'SANITY {score} (Cloudflare + iperf3; included in ABS score; cf {cf_score}, iperf {iperf_score})')
+    if profile == 'yabs':
+        label = 'current YABS iperf3 list'
+    elif profile == 'full':
+        label = '3-region public iperf3'
+    else:
+        label = 'custom iperf3'
+    print(f'FULL {score} (Cloudflare + {label}; cf {cf_score}, iperf {iperf_score})')
+elif requires_iperf:
+    pairs = min(len(send_vals), len(recv_vals))
+    print(f'PARTIAL - not comparable: iperf3 results {pairs}/{expected} pairs')
 else:
     print(f'SANITY {cf_score} (Cloudflare HTTP; included in ABS score)')
 PY
 }
+
 
 abs_score() {
   python3 - "$LOCAL_SCORE_TEXT" "$NETWORK_SCORE_TEXT" <<'PY'
 import re, sys
 local_text, net_text = sys.argv[1], sys.argv[2]
 ml = re.search(r'FULL\s+(\d+)', local_text or '')
-mn = re.search(r'SANITY\s+(\d+)', net_text or '')
+mn = re.search(r'(?:FULL|SANITY)\s+(\d+)', net_text or '')
 if not ml:
     print('PARTIAL - not comparable: missing local core')
     raise SystemExit
@@ -701,47 +736,111 @@ network_sanity() {
   fi
 }
 
+pick_port() {
+  local range="$1" low high
+  if [[ "$range" == *-* ]]; then
+    low="${range%-*}"
+    high="${range#*-}"
+    printf '%s\n' $(( low + RANDOM % (high - low + 1) ))
+  else
+    printf '%s\n' "$range"
+  fi
+}
+
+run_iperf_cmd() {
+  if have timeout; then
+    timeout 18 "$@"
+  else
+    "$@"
+  fi
+}
+
+parse_iperf_bps() {
+  python3 - "$1" "$2" <<'PY'
+import json, sys
+path, direction = sys.argv[1], sys.argv[2]
+try:
+    with open(path) as f:
+        d=json.load(f)
+    end=d.get('end', {})
+    key='sum_sent' if direction == 'send' else 'sum_received'
+    print(end.get(key, {}).get('bits_per_second') or end.get('sum', {}).get('bits_per_second') or 0)
+except Exception:
+    print(0)
+PY
+}
+
+iperf_pair() {
+  local host="$1" ports="$2" label="$3"
+  local safe_label port attempt json bps ok
+  safe_label="$(printf '%s' "$label" | tr -c 'A-Za-z0-9_.-' '_')"
+
+  ok=0
+  for attempt in 1 2; do
+    port="$(pick_port "$ports")"
+    json="$LOGDIR/iperf3-${safe_label}-send-${attempt}.json"
+    if run_iperf_cmd iperf3 -J -t "$IPERF_TIME" -P "$IPERF_PARALLEL" -c "$host" -p "$port" >"$json" 2>"$json.err"; then
+      bps="$(parse_iperf_bps "$json" send)"
+      if awk -v b="$bps" 'BEGIN{exit !(b+0>0)}'; then
+        add "Network iperf3 send $label" "$(awk -v b="$bps" 'BEGIN{printf "%.2f Mbps", b/1000000}')"
+        ok=1
+        break
+      fi
+    fi
+  done
+  [ "$ok" = "1" ] || add "Network iperf3 send $label" "FAILED; see $LOGDIR/iperf3-${safe_label}-send-*.err"
+
+  ok=0
+  for attempt in 1 2; do
+    port="$(pick_port "$ports")"
+    json="$LOGDIR/iperf3-${safe_label}-recv-${attempt}.json"
+    if run_iperf_cmd iperf3 -J -R -t "$IPERF_TIME" -P "$IPERF_PARALLEL" -c "$host" -p "$port" >"$json" 2>"$json.err"; then
+      bps="$(parse_iperf_bps "$json" recv)"
+      if awk -v b="$bps" 'BEGIN{exit !(b+0>0)}'; then
+        add "Network iperf3 recv $label" "$(awk -v b="$bps" 'BEGIN{printf "%.2f Mbps", b/1000000}')"
+        ok=1
+        break
+      fi
+    fi
+  done
+  [ "$ok" = "1" ] || add "Network iperf3 recv $label" "FAILED; see $LOGDIR/iperf3-${safe_label}-recv-*.err"
+}
+
 iperf_sanity() {
-  [ -n "$IPERF_SERVER" ] || return 0
+  [ "$NETWORK" = "1" ] || return 0
+  if [ -z "$IPERF_SERVER" ] && [ "$NETWORK_PROFILE" != "full" ] && [ "$NETWORK_PROFILE" != "yabs" ]; then
+    return 0
+  fi
   if ! have iperf3; then
     add "Network iperf3" "iperf3 missing; skipped"
     return 0
   fi
 
-  local host port label send_json recv_json send_bps recv_bps
-  if [[ "$IPERF_SERVER" == *:* && "$IPERF_SERVER" != \[* ]]; then
-    host="${IPERF_SERVER%:*}"
-    port="${IPERF_SERVER##*:}"
-  else
-    host="$IPERF_SERVER"
-    port=5201
-  fi
-  label="$host:$port"
-  send_json="$LOGDIR/iperf3-send.json"
-  recv_json="$LOGDIR/iperf3-recv.json"
-
-  if iperf3 -J -t "$IPERF_TIME" -P "$IPERF_PARALLEL" -c "$host" -p "$port" >"$send_json" 2>"$send_json.err"; then
-    send_bps="$(python3 - "$send_json" <<'PY'
-import json, sys
-with open(sys.argv[1]) as f: d=json.load(f)
-print(d.get('end', {}).get('sum_sent', {}).get('bits_per_second') or d.get('end', {}).get('sum', {}).get('bits_per_second') or 0)
-PY
-)"
-    add "Network iperf3 send ($label)" "$(awk -v b="$send_bps" 'BEGIN{printf "%.2f Mbps", b/1000000}')"
-  else
-    add "Network iperf3 send ($label)" "FAILED; see $send_json.err"
+  if [ -n "$IPERF_SERVER" ]; then
+    local host port label
+    if [[ "$IPERF_SERVER" == *:* && "$IPERF_SERVER" != \[* ]]; then
+      host="${IPERF_SERVER%:*}"
+      port="${IPERF_SERVER##*:}"
+    else
+      host="$IPERF_SERVER"
+      port=5201
+    fi
+    label="custom $host:$port"
+    iperf_pair "$host" "$port" "$label"
   fi
 
-  if iperf3 -J -R -t "$IPERF_TIME" -P "$IPERF_PARALLEL" -c "$host" -p "$port" >"$recv_json" 2>"$recv_json.err"; then
-    recv_bps="$(python3 - "$recv_json" <<'PY'
-import json, sys
-with open(sys.argv[1]) as f: d=json.load(f)
-print(d.get('end', {}).get('sum_received', {}).get('bits_per_second') or d.get('end', {}).get('sum', {}).get('bits_per_second') or 0)
-PY
-)"
-    add "Network iperf3 recv ($label)" "$(awk -v b="$recv_bps" 'BEGIN{printf "%.2f Mbps", b/1000000}')"
-  else
-    add "Network iperf3 recv ($label)" "FAILED; see $recv_json.err"
+  if [ "$NETWORK_PROFILE" = "full" ]; then
+    iperf_pair "speedtest.sin1.sg.leaseweb.net" "5201-5210" "Singapore Leaseweb"
+    iperf_pair "lon.speedtest.clouvider.net" "5200-5209" "London Clouvider"
+    iperf_pair "speedtest.nyc1.us.leaseweb.net" "5201-5210" "NYC Leaseweb"
+  elif [ "$NETWORK_PROFILE" = "yabs" ]; then
+    iperf_pair "lon.speedtest.clouvider.net" "5200-5209" "London Clouvider"
+    iperf_pair "iperf-ams-nl.eranium.net" "5201-5210" "Amsterdam Eranium"
+    iperf_pair "speedtest.uztelecom.uz" "5200-5209" "Tashkent Uztelecom"
+    iperf_pair "speedtest.sin1.sg.leaseweb.net" "5201-5210" "Singapore Leaseweb"
+    iperf_pair "la.speedtest.clouvider.net" "5200-5209" "Los_Angeles Clouvider"
+    iperf_pair "speedtest.nyc1.us.leaseweb.net" "5201-5210" "NYC Leaseweb"
+    iperf_pair "speedtest.sao1.edgoo.net" "9204-9240" "Sao_Paulo Edgoo"
   fi
 }
 
@@ -785,7 +884,7 @@ json_report() {
   ABS_DISK_TOTAL_KB="$DISK_TOTAL_KB" ABS_DISK_FREE_KB="$DISK_FREE_KB" ABS_VM_TYPE="$VM_TYPE" \
   ABS_IPV4="$IPV4_STATUS" ABS_IPV6="$IPV6_STATUS" ABS_IP_INFO="$IP_INFO" \
   ABS_THREADS="$T" ABS_DURATION="$D" ABS_SIZE="$SIZE" ABS_INSTALL="$INSTALL" ABS_INSTALL_ATTEMPTED="$INSTALL_ATTEMPTED" \
-  ABS_NET_INFO="$NET_INFO" ABS_NETWORK="$NETWORK" \
+  ABS_NET_INFO="$NET_INFO" ABS_NETWORK="$NETWORK" ABS_NETWORK_PROFILE="$NETWORK_PROFILE" \
   ABS_MISSING_TOOLS="$MISSING_AFTER_INSTALL" ABS_DIRECT="$DIRECT" ABS_FIO_ENGINE="$FIO_ENGINE" \
   ABS_JOBS="$JOBS" ABS_DEPTH="$DEPTH" ABS_IPERF_SERVER="$IPERF_SERVER" ABS_IPERF_TIME="$IPERF_TIME" ABS_IPERF_PARALLEL="$IPERF_PARALLEL" \
   ABS_SCORE="$SCORE_TEXT" ABS_LOCAL_SCORE="$LOCAL_SCORE_TEXT" ABS_NETWORK_SCORE="$NETWORK_SCORE_TEXT" ABS_VERDICT="$VERDICT_TEXT" \
@@ -845,7 +944,7 @@ out = {
     'mode': {
         'threads': env_int('ABS_THREADS'), 'duration_seconds': env_int('ABS_DURATION'), 'fio_size': env('ABS_SIZE'),
         'install': env('ABS_INSTALL') == '1', 'install_attempted': env('ABS_INSTALL_ATTEMPTED') == '1',
-        'net_info': env('ABS_NET_INFO') == '1', 'network': env('ABS_NETWORK') == '1',
+        'net_info': env('ABS_NET_INFO') == '1', 'network': env('ABS_NETWORK') == '1', 'network_profile': env('ABS_NETWORK_PROFILE'),
         'missing_tools': env('ABS_MISSING_TOOLS'), 'direct': env('ABS_DIRECT'), 'fio_engine': env('ABS_FIO_ENGINE'),
         'pressure_jobs': env_int('ABS_JOBS'), 'pressure_depth': env_int('ABS_DEPTH'),
         'iperf_server': env('ABS_IPERF_SERVER'), 'iperf_time': env_int('ABS_IPERF_TIME'), 'iperf_parallel': env_int('ABS_IPERF_PARALLEL'),
@@ -889,6 +988,11 @@ fi
 if [ "$NETWORK" = "1" ]; then
   echo "Network sanity enabled: downloads 25 MB and uploads 10 MB of zero data to Cloudflare. No result upload."
 fi
+if [ "$NETWORK_PROFILE" = "full" ]; then
+  echo "Network-full enabled: adds 3 short public iperf3 regional tests. Public iperf3 can be noisy."
+elif [ "$NETWORK_PROFILE" = "yabs" ]; then
+  echo "YABS-style network enabled: adds the full public YABS iperf3 list. This is slower/noisier."
+fi
 if [ -n "$IPERF_SERVER" ]; then
   echo "iperf3 enabled against $IPERF_SERVER for optional send/recv network signal."
 fi
@@ -920,7 +1024,9 @@ IPV6_STATUS="$(check_ip 6)"
 IP_INFO="$(ip_info_summary)"
 NETWORK_MODE="skipped (use --network)"
 [ "$NETWORK" = "1" ] && NETWORK_MODE="Cloudflare HTTP sanity"
-[ -n "$IPERF_SERVER" ] && NETWORK_MODE="$NETWORK_MODE + iperf3($IPERF_SERVER)"
+[ "$NETWORK" = "1" ] && [ "$NETWORK_PROFILE" = "full" ] && NETWORK_MODE="Cloudflare HTTP sanity + 3 public iperf3 regions"
+[ "$NETWORK" = "1" ] && [ "$NETWORK_PROFILE" = "yabs" ] && NETWORK_MODE="Cloudflare HTTP sanity + YABS public iperf3 list"
+[ "$NETWORK" = "1" ] && [ -n "$IPERF_SERVER" ] && NETWORK_MODE="$NETWORK_MODE + iperf3($IPERF_SERVER)"
 
 cat <<EOF
 # ABS v$VERSION
@@ -944,7 +1050,7 @@ IPv4/IPv6: $IPV4_STATUS / $IPV6_STATUS
 IP info  : $IP_INFO
 Network  : $NETWORK_MODE
 Fio size : $SIZE
-Mode     : install=$INSTALL, direct=$DIRECT, fio_engine=$FIO_ENGINE, pressure_jobs=$JOBS, pressure_depth=$DEPTH, net_info=$NET_INFO, network=$NETWORK, iperf=${IPERF_SERVER:-none}
+Mode     : install=$INSTALL, direct=$DIRECT, fio_engine=$FIO_ENGINE, pressure_jobs=$JOBS, pressure_depth=$DEPTH, net_info=$NET_INFO, network=$NETWORK, network_profile=$NETWORK_PROFILE, iperf=${IPERF_SERVER:-none}
 Duration : ${D}s/timed test
 Tools    : sysbench=$(sysbench --version 2>/dev/null | awk '{print $2}' || echo no), fio=$([ -n "$FIO_BIN" ] && "$FIO_BIN" --version 2>/dev/null || echo no), python3=$(python3 --version 2>/dev/null | awk '{print $2}' || echo no), curl=$(curl --version 2>/dev/null | awk 'NR==1{print $2}' || echo no)
 Logs     : $LOGDIR
@@ -1079,7 +1185,7 @@ else
   add "Network component" "$NETWORK_SCORE_TEXT"
   add "ABS verdict" "$VERDICT_TEXT"
 fi
-add_note "Score note" "ABS score includes network when available: 80% local CPU/memory/disk/fsync + 20% network. Use --no-network only when you want a non-comparable local-only run."
+add_note "Score note" "ABS score includes network: 80% local CPU/memory/disk/fsync + 20% network. Default network is Cloudflare sanity; --network-full adds 3 public iperf3 regions; --network-yabs uses the YABS list. Use --no-network only for a non-comparable local-only run."
 add_note "Privacy note" "No result upload. Default network sanity uses Cloudflare (25 MB down, 10 MB zero-data up); package install may contact distro mirrors unless -n is used. --net-info calls IP/ASN endpoints; --no-network skips speed checks."
 
 ELAPSED_SECONDS=$(( $(date +%s) - TIME_START_EPOCH ))
