@@ -46,8 +46,11 @@ curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash -
 | Disk random QD1 | `fio` 4K random read/write at queue depth 1, closer to VPS “feel” |
 | Disk pressure | `fio` 4K random read/write/mixed with capped jobs and queue depth 32 |
 | Durable write | `fio` 4K random write with `fsync=1`, including sync p95 when fio reports it |
+| ABS score | Weighted internal score from available CPU, memory, QD1 disk, and fsync results |
 
 ABS intentionally does **not** run Geekbench, Cloudflare speed tests, iperf, OpenSSL speed, or stress-ng. Keep the core signal clean.
+
+The ABS score is **not** Geekbench and is **not** YABS-compatible. It is an internal convenience score for quick same-tool comparisons.
 
 ## Auto defaults
 
@@ -88,7 +91,7 @@ ABS prints a table directly and writes full logs plus a TSV summary under `/tmp/
 Example header:
 
 ```text
-# ABS v0.1.0
+# ABS v0.2.0
 vCPU     : 3
 Threads  : 3
 Fio size : 4G
@@ -102,11 +105,21 @@ Use ABS for relative comparisons with the same command and similar time of day. 
 
 Most useful lines for ordinary VPS workloads:
 
+- `ABS score` for quick same-tool ranking
 - `CPU single thread`
 - `CPU all threads`
 - `Disk random read/write 4K QD1`
 - `Disk random mixed 4K 60r/40w`
 - `Disk durable write 4K fsync`
+
+Score formula, roughly:
+
+- 40% CPU: sysbench single-thread and per-thread all-core throughput
+- 15% memory: sysbench read/write throughput
+- 30% disk: fio 4K QD1 read/write IOPS
+- 15% durable write: fio 4K fsync writes/s
+
+If fio is missing, failed, or a section is skipped, ABS prints a partial score and lists missing components.
 
 ## Safety
 

@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 export LC_ALL=C
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 VCPU="$(nproc 2>/dev/null || echo 1)"
 D="${D:-30}"                                # seconds per timed test
 T="${T:-$VCPU}"                             # CPU/memory benchmark threads
@@ -172,6 +172,10 @@ add() {
   printf '%s\t%s\n' "$1" "$2" >> "$RESULTS"
 }
 
+add_note() {
+  printf '%-48s %s\n' "$1" "$2"
+}
+
 field() { awk -v key="$1" '$0 ~ key {print $NF; exit}' "$2"; }
 eps() { field 'events per second' "$1"; }
 p95() { field '95th percentile' "$1"; }
@@ -312,6 +316,91 @@ print(f'{val:.2f}')
 PY
 }
 
+abs_score() {
+  python3 - "$RESULTS" "$T" <<'PY'
+import csv, math, re, sys
+path = sys.argv[1]
+threads = float(sys.argv[2]) if len(sys.argv) > 2 else 1.0
+rows = {}
+try:
+    with open(path, newline='', encoding='utf-8', errors='replace') as f:
+        for row in csv.reader(f, delimiter='\t'):
+            if len(row) >= 2 and row[0] != 'Metric':
+                rows[row[0]] = row[1]
+except Exception:
+    print('n/a')
+    raise SystemExit
+
+def first_num(text):
+    text = text or ''
+    low = text.lower()
+    if any(word in low for word in ('failed', 'skipped', 'invalid', 'not enough', 'not installed')):
+        return None
+    m = re.search(r'[0-9]+(?:\.[0-9]+)?', text)
+    return float(m.group(0)) if m else None
+
+def metric(prefix):
+    for k, v in rows.items():
+        if k.startswith(prefix):
+            return v
+    return None
+
+def clamp(x, lo=0, hi=3000):
+    return max(lo, min(hi, x))
+
+components = []
+missing = []
+
+single = first_num(metric('CPU single thread'))
+all_cpu = first_num(metric('CPU all threads'))
+if single and all_cpu and threads > 0:
+    # Baseline: ~400 sysbench events/s per thread ≈ score 1000.
+    per_thread = all_cpu / threads
+    cpu = 1000 * math.sqrt((single / 400.0) * (per_thread / 400.0))
+    components.append(('cpu', clamp(cpu), 0.40))
+else:
+    missing.append('cpu')
+
+mem_read = first_num(metric('Memory read'))
+mem_write = first_num(metric('Memory write'))
+if mem_read and mem_write:
+    # Baseline: 30 GiB/s read + 20 GiB/s write ≈ score 1000.
+    mem = 1000 * math.sqrt((mem_read / 30000.0) * (mem_write / 20000.0))
+    components.append(('mem', clamp(mem), 0.15))
+else:
+    missing.append('mem')
+
+qd1_read = first_num(metric('Disk random read 4K QD1'))
+qd1_write = first_num(metric('Disk random write 4K QD1'))
+if qd1_read and qd1_write:
+    # Baseline: 10k read IOPS + 5k write IOPS at QD1 ≈ score 1000.
+    disk = 1000 * math.sqrt((qd1_read / 10000.0) * (qd1_write / 5000.0))
+    components.append(('disk', clamp(disk), 0.30))
+else:
+    missing.append('disk')
+
+fsync = first_num(metric('Disk durable write 4K fsync'))
+if fsync:
+    # Baseline: 2k durable 4K writes/s ≈ score 1000.
+    dur = 1000 * math.sqrt(fsync / 2000.0)
+    components.append(('fsync', clamp(dur), 0.15))
+else:
+    missing.append('fsync')
+
+if not components:
+    print('n/a')
+    raise SystemExit
+
+total_w = sum(w for _, _, w in components)
+score = round(sum(v * w for _, v, w in components) / total_w)
+parts = ','.join(name for name, _, _ in components)
+if missing:
+    print(f'{score} partial ({parts}; missing {",".join(missing)})')
+else:
+    print(f'{score} ({parts})')
+PY
+}
+
 cleanup() {
   rm -f "$FIO_FILE" "$FIO_FILE".* 2>/dev/null || true
 }
@@ -436,6 +525,13 @@ if [ -n "$FIO_BIN" ] && have python3; then
 else
   add "fio disk tests" "fio or python3 not installed; skipped"
 fi
+
+if have python3; then
+  add "ABS score" "$(abs_score)"
+else
+  add "ABS score" "n/a (python3 missing)"
+fi
+add_note "Score note" "ABS score is internal; not Geekbench/YABS-compatible."
 
 trap - EXIT
 cleanup
