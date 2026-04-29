@@ -57,24 +57,37 @@ Default ABS intentionally runs shorter than YABS. It favors useful signal over e
 | Disk pressure | `fio` 4K random read/write/mixed with capped jobs and queue depth 32 |
 | Durable write | `fio` 4K random write with `fsync=1`, including sync p95 when fio reports it |
 | Fallback disk | small `dd` sequential fallback if fio is unavailable; not scored |
-| Network sanity | default Cloudflare HTTP check with separate network sanity score: about 25 MB download plus 10 MB zero-data upload; `--no-network` skips it |
-| ABS local score/verdict | internal local CPU/memory/disk/fsync score plus `KEEP` / `MAYBE` / `AVOID` / `INCOMPLETE` verdict; network is shown separately as `Network sanity score` |
+| Network sanity | default Cloudflare HTTP check: about 25 MB download plus 10 MB zero-data upload; `--no-network` skips it |
+| Optional iperf3 | `--iperf HOST[:PORT]` adds send/recv throughput against your own comparable iperf3 server |
+| ABS score/verdict | internal same-tool score plus `KEEP` / `MAYBE` / `AVOID` / `INCOMPLETE` verdict; default score includes network |
 
 ## Score and verdict
 
-`ABS local score` is **not Geekbench** and **not YABS-compatible**. It is an internal same-tool convenience score for local CPU, memory, disk, and fsync. Network is reported as a separate `Network sanity score`, not mixed into the local score.
+`ABS score` is **not Geekbench** and **not YABS-compatible**. It is an internal same-tool convenience score for VPS buying decisions. By default it includes network: **80% local CPU/memory/disk/fsync + 20% network**.
+
+ABS still prints the components separately:
+
+```text
+ABS score          FULL ... (80% local + 20% network)
+Local component    FULL ...
+Network component  SANITY ...
+```
 
 Rough weighting:
 
-- 40% CPU: sysbench single-thread and per-thread all-core throughput
-- 15% memory: sysbench read/write throughput
-- 30% disk: fio 4K QD1 read/write IOPS
-- 15% durable write: fio 4K fsync writes/s
+- 80% local component:
+  - 40% CPU: sysbench single-thread and per-thread all-core throughput
+  - 15% memory: sysbench read/write throughput
+  - 30% disk: fio 4K QD1 read/write IOPS
+  - 15% durable write: fio 4K fsync writes/s
+- 20% network component:
+  - default Cloudflare HTTP TTFB/download/upload sanity
+  - optional `--iperf HOST[:PORT]` blended into the network component when provided
 
-A full score requires CPU, memory, disk QD1, and fsync. If any core section is missing, ABS prints:
+A full score requires CPU, memory, disk QD1, fsync, and network. If any required section is missing, ABS prints:
 
 ```text
-ABS local score: PARTIAL - not comparable
+ABS score: PARTIAL - not comparable
 ABS verdict: INCOMPLETE
 ```
 
@@ -93,6 +106,7 @@ That avoids misleading screenshots when fio or sysbench is missing. ABS also add
 --no-net-info        skip external IP/ASN lookup (default)
 --network            run Cloudflare HTTP network sanity test (default)
 --no-network         skip network speed sanity test
+--iperf HOST[:PORT]  optional iperf3 send/recv against your own server
 --json               print JSON result at the end
 --json-file PATH     write JSON result to PATH as well as logdir
 -h, --help           help
@@ -120,7 +134,8 @@ Use `--json-file result.json` to copy JSON somewhere specific.
 - No automatic result upload.
 - Default mode may install `sysbench`, `fio`, `python3`, `curl`, and small distro support packages if missing.
 - Use `-n` / `--no-install` to skip package installation entirely.
-- Default mode calls Cloudflare speed endpoints for a short HTTP network sanity check; use `--no-network` to skip it.
+- Default mode calls Cloudflare speed endpoints for a short HTTP network sanity check; use `--no-network` to skip it, but the ABS score becomes partial/non-comparable.
+- `--iperf HOST[:PORT]` calls the iperf3 server you provide and folds that signal into the network component.
 - `--net-info` calls external endpoints for IPv4/IPv6 and IP/ASN lookup.
 - Disk tests create temporary files in `.abs`, then remove them.
 

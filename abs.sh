@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 export LC_ALL=C
 
-VERSION="0.4.3"
+VERSION="0.4.4"
 TIME_START_EPOCH="$(date +%s)"
 TIME_START_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 VCPU="$(nproc 2>/dev/null || echo 1)"
@@ -20,6 +20,9 @@ DEPTH="${DEPTH:-32}"
 INSTALL="${INSTALL:-1}"
 NET_INFO="${NET_INFO:-0}"
 NETWORK="${NETWORK:-1}"
+IPERF_SERVER="${IPERF_SERVER:-}"
+IPERF_TIME="${IPERF_TIME:-8}"
+IPERF_PARALLEL="${IPERF_PARALLEL:-2}"
 JSON_PRINT="${JSON_PRINT:-0}"
 JSON_FILE="${JSON_FILE:-}"
 LOGDIR="${LOGDIR:-/tmp/abs-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
@@ -32,6 +35,7 @@ JOBS=""
 LAST_LOG=""
 LAST_JSON=""
 SCORE_TEXT="n/a"
+LOCAL_SCORE_TEXT="n/a"
 NETWORK_SCORE_TEXT="skipped"
 VERDICT_TEXT="n/a"
 INSTALL_ATTEMPTED="0"
@@ -58,6 +62,7 @@ Options:
   --no-net-info        skip external IP/ASN lookup (default)
   --network            run Cloudflare HTTP network sanity test (default)
   --no-network         skip network speed sanity test
+  --iperf HOST[:PORT]  optional iperf3 send/recv against your own server
   --json               print JSON result at the end
   --json-file PATH     write JSON result to PATH as well as logdir
   -h, --help           help
@@ -94,6 +99,9 @@ while [ "$#" -gt 0 ]; do
     --no-net-info) NET_INFO=0 ;;
     --network) NETWORK=1 ;;
     --no-network) NETWORK=0 ;;
+    --iperf)
+      shift; [ "$#" -gt 0 ] || { echo "Missing value for --iperf" >&2; exit 2; }
+      IPERF_SERVER="$1"; NETWORK=1 ;;
     --json) JSON_PRINT=1 ;;
     --json-file)
       shift; [ "$#" -gt 0 ] || { echo "Missing value for --json-file" >&2; exit 2; }
@@ -125,6 +133,8 @@ is_pos_int() { [[ "${1:-}" =~ ^[1-9][0-9]*$ ]]; }
 if ! is_pos_int "$D"; then echo "Invalid duration: $D" >&2; exit 2; fi
 if ! is_pos_int "$T"; then echo "Invalid threads: $T" >&2; exit 2; fi
 if ! is_pos_int "$DEPTH"; then echo "Invalid DEPTH: $DEPTH" >&2; exit 2; fi
+if ! is_pos_int "$IPERF_TIME"; then echo "Invalid IPERF_TIME: $IPERF_TIME" >&2; exit 2; fi
+if ! is_pos_int "$IPERF_PARALLEL"; then echo "Invalid IPERF_PARALLEL: $IPERF_PARALLEL" >&2; exit 2; fi
 if [ "$NET_INFO" != "0" ] && [ "$NET_INFO" != "1" ]; then echo "Invalid NET_INFO: $NET_INFO" >&2; exit 2; fi
 if [ "$NETWORK" != "0" ] && [ "$NETWORK" != "1" ]; then echo "Invalid NETWORK: $NETWORK" >&2; exit 2; fi
 
@@ -213,6 +223,9 @@ missing_tools() {
   if [ "$NETWORK" = "1" ] || [ "$NET_INFO" = "1" ]; then
     have curl || missing+=(curl)
   fi
+  if [ -n "$IPERF_SERVER" ]; then
+    have iperf3 || missing+=(iperf3)
+  fi
   printf '%s\n' "${missing[@]}"
 }
 
@@ -230,24 +243,27 @@ install_tools() {
   echo "Missing tools: $missing"
   echo "Installing missing tools when possible... use -n/--no-install to skip installation."
 
-  local curl_pkg=""
+  local curl_pkg="" iperf_pkg=""
   if [ "$NETWORK" = "1" ] || [ "$NET_INFO" = "1" ]; then
     curl_pkg="curl"
+  fi
+  if [ -n "$IPERF_SERVER" ]; then
+    iperf_pkg="iperf3"
   fi
 
   if have apt-get; then
     sudo_cmd env DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null 2>"$LOGDIR/install-apt-update.err" || true
-    sudo_cmd env DEBIAN_FRONTEND=noninteractive apt-get install -y sysbench fio python3 ca-certificates procps $curl_pkg \
+    sudo_cmd env DEBIAN_FRONTEND=noninteractive apt-get install -y sysbench fio python3 ca-certificates procps $curl_pkg $iperf_pkg \
       >"$LOGDIR/install-apt.log" 2>"$LOGDIR/install-apt.err" || true
   elif have dnf; then
-    sudo_cmd dnf install -y sysbench fio python3 procps-ng $curl_pkg >"$LOGDIR/install-dnf.log" 2>"$LOGDIR/install-dnf.err" || true
+    sudo_cmd dnf install -y sysbench fio python3 procps-ng $curl_pkg $iperf_pkg >"$LOGDIR/install-dnf.log" 2>"$LOGDIR/install-dnf.err" || true
   elif have yum; then
     sudo_cmd yum install -y epel-release >"$LOGDIR/install-yum-epel.log" 2>"$LOGDIR/install-yum-epel.err" || true
-    sudo_cmd yum install -y sysbench fio python3 procps-ng $curl_pkg >"$LOGDIR/install-yum.log" 2>"$LOGDIR/install-yum.err" || true
+    sudo_cmd yum install -y sysbench fio python3 procps-ng $curl_pkg $iperf_pkg >"$LOGDIR/install-yum.log" 2>"$LOGDIR/install-yum.err" || true
   elif have pacman; then
-    sudo_cmd pacman -Sy --noconfirm sysbench fio python procps $curl_pkg >"$LOGDIR/install-pacman.log" 2>"$LOGDIR/install-pacman.err" || true
+    sudo_cmd pacman -Sy --noconfirm sysbench fio python procps $curl_pkg $iperf_pkg >"$LOGDIR/install-pacman.log" 2>"$LOGDIR/install-pacman.err" || true
   elif have apk; then
-    sudo_cmd apk add --no-cache sysbench fio python3 procps $curl_pkg >"$LOGDIR/install-apk.log" 2>"$LOGDIR/install-apk.err" || true
+    sudo_cmd apk add --no-cache sysbench fio python3 procps $curl_pkg $iperf_pkg >"$LOGDIR/install-apk.log" 2>"$LOGDIR/install-apk.err" || true
   fi
 
   have_fio || true
@@ -405,7 +421,7 @@ print(f'{val:.2f}')
 PY
 }
 
-abs_score() {
+abs_local_score() {
   python3 - "$RESULTS" "$T" <<'PY'
 import csv, math, re, sys
 path = sys.argv[1]
@@ -488,11 +504,11 @@ PY
 
 network_score() {
   if [ "$NETWORK" != "1" ]; then
-    printf 'skipped; use --network'
+    printf 'PARTIAL - not comparable: missing network (--no-network)'
     return 0
   fi
   python3 - "$RESULTS" <<'PY'
-import csv, re, sys
+import csv, math, re, sys
 rows = {}
 try:
     with open(sys.argv[1], newline='', encoding='utf-8', errors='replace') as f:
@@ -507,11 +523,12 @@ def first_num(prefix):
     for k, v in rows.items():
         if k.startswith(prefix):
             low = (v or '').lower()
-            if any(w in low for w in ('failed', 'skipped', 'not installed')):
+            if any(w in low for w in ('failed', 'skipped', 'not installed', 'missing')):
                 return None
             m = re.search(r'[0-9]+(?:\.[0-9]+)?', v)
             return float(m.group(0)) if m else None
     return None
+
 lat = first_num('Network Cloudflare TTFB')
 down = first_num('Network Cloudflare download')
 up = first_num('Network Cloudflare upload')
@@ -522,12 +539,41 @@ if up is None: missing.append('upload')
 if missing:
     print('PARTIAL - not comparable: missing ' + ','.join(missing))
     raise SystemExit
-# Sanity score only: Cloudflare HTTP path, not a rigorous iperf/network benchmark.
+
 lat_component = min(3.0, max(0.1, 100.0 / max(lat, 1.0)))
 down_component = min(3.0, max(0.1, down / 100.0))
 up_component = min(3.0, max(0.1, up / 50.0))
-score = round(1000 * (lat_component * down_component * up_component) ** (1/3))
-print(f'SANITY {score} (Cloudflare HTTP; separate from ABS local score)')
+cf_score = round(1000 * (lat_component * down_component * up_component) ** (1/3))
+
+iperf_send = first_num('Network iperf3 send')
+iperf_recv = first_num('Network iperf3 recv')
+if iperf_send is not None and iperf_recv is not None:
+    send_component = min(3.0, max(0.1, iperf_send / 500.0))
+    recv_component = min(3.0, max(0.1, iperf_recv / 500.0))
+    iperf_score = round(1000 * math.sqrt(send_component * recv_component))
+    score = round(cf_score * 0.6 + iperf_score * 0.4)
+    print(f'SANITY {score} (Cloudflare + iperf3; included in ABS score; cf {cf_score}, iperf {iperf_score})')
+else:
+    print(f'SANITY {cf_score} (Cloudflare HTTP; included in ABS score)')
+PY
+}
+
+abs_score() {
+  python3 - "$LOCAL_SCORE_TEXT" "$NETWORK_SCORE_TEXT" <<'PY'
+import re, sys
+local_text, net_text = sys.argv[1], sys.argv[2]
+ml = re.search(r'FULL\s+(\d+)', local_text or '')
+mn = re.search(r'SANITY\s+(\d+)', net_text or '')
+if not ml:
+    print('PARTIAL - not comparable: missing local core')
+    raise SystemExit
+local = int(ml.group(1))
+if not mn:
+    print(f'PARTIAL - not comparable: {local} (local only; missing network)')
+    raise SystemExit
+network = int(mn.group(1))
+score = round(local * 0.80 + network * 0.20)
+print(f'FULL {score} (80% local + 20% network; local {local}, network {network})')
 PY
 }
 
@@ -655,6 +701,50 @@ network_sanity() {
   fi
 }
 
+iperf_sanity() {
+  [ -n "$IPERF_SERVER" ] || return 0
+  if ! have iperf3; then
+    add "Network iperf3" "iperf3 missing; skipped"
+    return 0
+  fi
+
+  local host port label send_json recv_json send_bps recv_bps
+  if [[ "$IPERF_SERVER" == *:* && "$IPERF_SERVER" != \[* ]]; then
+    host="${IPERF_SERVER%:*}"
+    port="${IPERF_SERVER##*:}"
+  else
+    host="$IPERF_SERVER"
+    port=5201
+  fi
+  label="$host:$port"
+  send_json="$LOGDIR/iperf3-send.json"
+  recv_json="$LOGDIR/iperf3-recv.json"
+
+  if iperf3 -J -t "$IPERF_TIME" -P "$IPERF_PARALLEL" -c "$host" -p "$port" >"$send_json" 2>"$send_json.err"; then
+    send_bps="$(python3 - "$send_json" <<'PY'
+import json, sys
+with open(sys.argv[1]) as f: d=json.load(f)
+print(d.get('end', {}).get('sum_sent', {}).get('bits_per_second') or d.get('end', {}).get('sum', {}).get('bits_per_second') or 0)
+PY
+)"
+    add "Network iperf3 send ($label)" "$(awk -v b="$send_bps" 'BEGIN{printf "%.2f Mbps", b/1000000}')"
+  else
+    add "Network iperf3 send ($label)" "FAILED; see $send_json.err"
+  fi
+
+  if iperf3 -J -R -t "$IPERF_TIME" -P "$IPERF_PARALLEL" -c "$host" -p "$port" >"$recv_json" 2>"$recv_json.err"; then
+    recv_bps="$(python3 - "$recv_json" <<'PY'
+import json, sys
+with open(sys.argv[1]) as f: d=json.load(f)
+print(d.get('end', {}).get('sum_received', {}).get('bits_per_second') or d.get('end', {}).get('sum', {}).get('bits_per_second') or 0)
+PY
+)"
+    add "Network iperf3 recv ($label)" "$(awk -v b="$recv_bps" 'BEGIN{printf "%.2f Mbps", b/1000000}')"
+  else
+    add "Network iperf3 recv ($label)" "FAILED; see $recv_json.err"
+  fi
+}
+
 dd_fallback() {
   if ! have dd; then
     add "Disk fallback dd" "dd not installed; skipped"
@@ -697,7 +787,8 @@ json_report() {
   ABS_THREADS="$T" ABS_DURATION="$D" ABS_SIZE="$SIZE" ABS_INSTALL="$INSTALL" ABS_INSTALL_ATTEMPTED="$INSTALL_ATTEMPTED" \
   ABS_NET_INFO="$NET_INFO" ABS_NETWORK="$NETWORK" \
   ABS_MISSING_TOOLS="$MISSING_AFTER_INSTALL" ABS_DIRECT="$DIRECT" ABS_FIO_ENGINE="$FIO_ENGINE" \
-  ABS_JOBS="$JOBS" ABS_DEPTH="$DEPTH" ABS_SCORE="$SCORE_TEXT" ABS_NETWORK_SCORE="$NETWORK_SCORE_TEXT" ABS_VERDICT="$VERDICT_TEXT" \
+  ABS_JOBS="$JOBS" ABS_DEPTH="$DEPTH" ABS_IPERF_SERVER="$IPERF_SERVER" ABS_IPERF_TIME="$IPERF_TIME" ABS_IPERF_PARALLEL="$IPERF_PARALLEL" \
+  ABS_SCORE="$SCORE_TEXT" ABS_LOCAL_SCORE="$LOCAL_SCORE_TEXT" ABS_NETWORK_SCORE="$NETWORK_SCORE_TEXT" ABS_VERDICT="$VERDICT_TEXT" \
   python3 - "$RESULTS" <<'PY'
 import csv, json, os, re, shutil, sys
 results_path = sys.argv[1]
@@ -717,6 +808,7 @@ def env_int(name):
     try: return int(float(env(name, '0') or 0))
     except Exception: return 0
 score_text = env('ABS_SCORE')
+local_score_text = env('ABS_LOCAL_SCORE')
 score_status = 'none'
 score_value = None
 missing_components = []
@@ -756,17 +848,19 @@ out = {
         'net_info': env('ABS_NET_INFO') == '1', 'network': env('ABS_NETWORK') == '1',
         'missing_tools': env('ABS_MISSING_TOOLS'), 'direct': env('ABS_DIRECT'), 'fio_engine': env('ABS_FIO_ENGINE'),
         'pressure_jobs': env_int('ABS_JOBS'), 'pressure_depth': env_int('ABS_DEPTH'),
+        'iperf_server': env('ABS_IPERF_SERVER'), 'iperf_time': env_int('ABS_IPERF_TIME'), 'iperf_parallel': env_int('ABS_IPERF_PARALLEL'),
     },
     'score': {
         'text': score_text,
-        'scope': 'local_cpu_memory_disk_fsync',
-        'excludes_network': True,
+        'scope': 'local_plus_network',
+        'includes_network': True,
         'status': score_status,
         'value': score_value,
         'comparable': score_status == 'full',
         'missing_components': missing_components,
     },
-    'network_score': {'text': network_score_text, 'included_in_local_score': False},
+    'local_score': {'text': local_score_text, 'scope': 'local_cpu_memory_disk_fsync'},
+    'network_score': {'text': network_score_text, 'included_in_score': True, 'weight': 0.20},
     'verdict': {'text': verdict_text, 'code': verdict_code, 'reason': verdict_reason},
     'results': rows,
 }
@@ -794,6 +888,9 @@ if [ "$NET_INFO" = "1" ]; then
 fi
 if [ "$NETWORK" = "1" ]; then
   echo "Network sanity enabled: downloads 25 MB and uploads 10 MB of zero data to Cloudflare. No result upload."
+fi
+if [ -n "$IPERF_SERVER" ]; then
+  echo "iperf3 enabled against $IPERF_SERVER for optional send/recv network signal."
 fi
 
 install_tools
@@ -823,6 +920,7 @@ IPV6_STATUS="$(check_ip 6)"
 IP_INFO="$(ip_info_summary)"
 NETWORK_MODE="skipped (use --network)"
 [ "$NETWORK" = "1" ] && NETWORK_MODE="Cloudflare HTTP sanity"
+[ -n "$IPERF_SERVER" ] && NETWORK_MODE="$NETWORK_MODE + iperf3($IPERF_SERVER)"
 
 cat <<EOF
 # ABS v$VERSION
@@ -846,7 +944,7 @@ IPv4/IPv6: $IPV4_STATUS / $IPV6_STATUS
 IP info  : $IP_INFO
 Network  : $NETWORK_MODE
 Fio size : $SIZE
-Mode     : install=$INSTALL, direct=$DIRECT, fio_engine=$FIO_ENGINE, pressure_jobs=$JOBS, pressure_depth=$DEPTH, net_info=$NET_INFO, network=$NETWORK
+Mode     : install=$INSTALL, direct=$DIRECT, fio_engine=$FIO_ENGINE, pressure_jobs=$JOBS, pressure_depth=$DEPTH, net_info=$NET_INFO, network=$NETWORK, iperf=${IPERF_SERVER:-none}
 Duration : ${D}s/timed test
 Tools    : sysbench=$(sysbench --version 2>/dev/null | awk '{print $2}' || echo no), fio=$([ -n "$FIO_BIN" ] && "$FIO_BIN" --version 2>/dev/null || echo no), python3=$(python3 --version 2>/dev/null | awk '{print $2}' || echo no), curl=$(curl --version 2>/dev/null | awk 'NR==1{print $2}' || echo no)
 Logs     : $LOGDIR
@@ -960,23 +1058,28 @@ else
 fi
 
 network_sanity
+iperf_sanity
 
 if have python3; then
-  SCORE_TEXT="$(abs_score)"
-  add "ABS local score" "$SCORE_TEXT"
+  LOCAL_SCORE_TEXT="$(abs_local_score)"
   NETWORK_SCORE_TEXT="$(network_score)"
-  add "Network sanity score" "$NETWORK_SCORE_TEXT"
+  SCORE_TEXT="$(abs_score)"
+  add "ABS score" "$SCORE_TEXT"
+  add "Local component" "$LOCAL_SCORE_TEXT"
+  add "Network component" "$NETWORK_SCORE_TEXT"
   VERDICT_TEXT="$(abs_verdict)"
   add "ABS verdict" "$VERDICT_TEXT"
 else
   SCORE_TEXT="n/a (python3 missing)"
+  LOCAL_SCORE_TEXT="n/a (python3 missing)"
   NETWORK_SCORE_TEXT="n/a (python3 missing)"
   VERDICT_TEXT="INCOMPLETE - python3 missing"
-  add "ABS local score" "$SCORE_TEXT"
-  add "Network sanity score" "$NETWORK_SCORE_TEXT"
+  add "ABS score" "$SCORE_TEXT"
+  add "Local component" "$LOCAL_SCORE_TEXT"
+  add "Network component" "$NETWORK_SCORE_TEXT"
   add "ABS verdict" "$VERDICT_TEXT"
 fi
-add_note "Score note" "ABS local score is CPU/memory/disk/fsync only; network is a separate sanity score. FULL requires CPU, memory, disk QD1, and fsync; PARTIAL is not comparable."
+add_note "Score note" "ABS score includes network when available: 80% local CPU/memory/disk/fsync + 20% network. Use --no-network only when you want a non-comparable local-only run."
 add_note "Privacy note" "No result upload. Default network sanity uses Cloudflare (25 MB down, 10 MB zero-data up); package install may contact distro mirrors unless -n is used. --net-info calls IP/ASN endpoints; --no-network skips speed checks."
 
 ELAPSED_SECONDS=$(( $(date +%s) - TIME_START_EPOCH ))
