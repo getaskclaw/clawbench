@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.clawbench-*.tmp
+result.json
+report.md
