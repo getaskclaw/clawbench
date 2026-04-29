@@ -2,64 +2,127 @@
 set -Eeuo pipefail
 export LC_ALL=C
 
-VERSION="0.2.0"
+VERSION="0.3.0"
+TIME_START_EPOCH="$(date +%s)"
+TIME_START_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 VCPU="$(nproc 2>/dev/null || echo 1)"
-D="${D:-30}"                                # seconds per timed test
-T="${T:-$VCPU}"                             # CPU/memory benchmark threads
-SIZE="${SIZE:-auto}"                        # fio test file size; auto-detected unless set
-DIR="${DIR:-$PWD/.abs}"                      # disk test location
+
+PROFILE="${PROFILE:-default}"
+D="${D:-}"
+T="${T:-$VCPU}"
+SIZE="${SIZE:-auto}"
+DIR="${DIR:-$PWD/.abs}"
 CPU_PRIME="${CPU_PRIME:-20000}"
-DIRECT="${DIRECT:-1}"                       # set DIRECT=0 if direct I/O fails
-FIO_ENGINE="${FIO_ENGINE:-libaio}"          # try FIO_ENGINE=psync if libaio fails
-JOBS_ENV="${JOBS-}"                         # optional pressure random I/O jobs
-DEPTH="${DEPTH:-32}"                        # pressure random I/O queue depth
-INSTALL="${INSTALL:-1}"                     # default: one-line run installs missing tools
+DIRECT="${DIRECT:-1}"
+FIO_ENGINE="${FIO_ENGINE:-libaio}"
+JOBS_ENV="${JOBS-}"
+DEPTH="${DEPTH:-32}"
+INSTALL="${INSTALL:-1}"
+NET_INFO="${NET_INFO:-1}"
+NETWORK="${NETWORK:-0}"
+JSON_PRINT="${JSON_PRINT:-0}"
+JSON_FILE="${JSON_FILE:-}"
 LOGDIR="${LOGDIR:-/tmp/abs-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 
 RESULTS="$LOGDIR/results.tsv"
+JSON_RESULT="$LOGDIR/result.json"
 FIO_FILE="$DIR/abs.test"
 FIO_BIN=""
 JOBS=""
 LAST_LOG=""
 LAST_JSON=""
+SCORE_TEXT="n/a"
+VERDICT_TEXT="n/a"
+INSTALL_ATTEMPTED="0"
+MISSING_AFTER_INSTALL=""
 
 usage() {
   cat <<EOF
 ABS v$VERSION — AskClaw Benchmark Script
 
-One-line run after hosting:
+One-line run:
   curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash
   wget -qO- https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash
 
-Explicit overrides:
-  curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash -s -- -d 60 -z 8G -t 3
+Default profile targets under 3 minutes. ABS is local-first: no upload.
 
 Options:
-  -d SECONDS   seconds per timed test   default: $D
-  -z SIZE      fio test file size       default: auto (~1/10 free disk, capped at 8G)
-  -t THREADS   CPU/memory threads       default: detected vCPU ($T)
-  -n           no install; skip missing tools
-  -h           help
+  --quick              ~60s smoke profile
+  --full               stronger 5–8 min profile
+  -d, --duration SEC   seconds per timed test
+  -z, --size SIZE      fio test file size, e.g. 512M, 2G, 8G; default auto
+  -t, --threads N      CPU/memory threads; default detected vCPU ($T)
+  -n, --no-install     do not install missing packages
+  --no-net-info        skip external IP/ASN lookup
+  --network            run optional Cloudflare HTTP network sanity test
+  --json               print JSON result at the end
+  --json-file PATH     write JSON result to PATH as well as logdir
+  -h, --help           help
 
-Env overrides also work: D=60 SIZE=8G T=3 INSTALL=0 bash abs.sh
+Examples:
+  curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash -s -- --quick -n
+  curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash -s -- --full -z 8G --network --json
+
+Env overrides also work: PROFILE=full SIZE=8G INSTALL=0 bash abs.sh
 EOF
 }
 
-while getopts ":d:z:t:nh" opt; do
-  case "$opt" in
-    d) D="$OPTARG" ;;
-    z) SIZE="$OPTARG" ;;
-    t) T="$OPTARG" ;;
-    n) INSTALL=0 ;;
-    h) usage; exit 0 ;;
-    *) usage >&2; exit 2 ;;
+D_SET=0
+SIZE_SET=0
+[ -n "$D" ] && D_SET=1
+[ "$SIZE" != "auto" ] && SIZE_SET=1
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --quick) PROFILE="quick" ;;
+    --full) PROFILE="full" ;;
+    -d|--duration)
+      shift; [ "$#" -gt 0 ] || { echo "Missing value for -d/--duration" >&2; exit 2; }
+      D="$1"; D_SET=1 ;;
+    -z|--size)
+      shift; [ "$#" -gt 0 ] || { echo "Missing value for -z/--size" >&2; exit 2; }
+      SIZE="$1"; SIZE_SET=1 ;;
+    -t|--threads)
+      shift; [ "$#" -gt 0 ] || { echo "Missing value for -t/--threads" >&2; exit 2; }
+      T="$1" ;;
+    -n|--no-install) INSTALL=0 ;;
+    --no-net-info) NET_INFO=0 ;;
+    --network) NETWORK=1 ;;
+    --json) JSON_PRINT=1 ;;
+    --json-file)
+      shift; [ "$#" -gt 0 ] || { echo "Missing value for --json-file" >&2; exit 2; }
+      JSON_FILE="$1" ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
+  shift
 done
 
+case "$PROFILE" in
+  quick)
+    PROFILE_TARGET="60s"
+    [ "$D_SET" -eq 1 ] || D=5
+    [ "$SIZE_SET" -eq 1 ] || SIZE=512M
+    ;;
+  default)
+    PROFILE_TARGET="under 3 minutes"
+    [ "$D_SET" -eq 1 ] || D=8
+    ;;
+  full)
+    PROFILE_TARGET="5–8 minutes"
+    [ "$D_SET" -eq 1 ] || D=30
+    ;;
+  *) echo "Invalid PROFILE: $PROFILE" >&2; exit 2 ;;
+esac
+
 is_pos_int() { [[ "${1:-}" =~ ^[1-9][0-9]*$ ]]; }
-if ! is_pos_int "$D"; then echo "Invalid -d/SECONDS: $D" >&2; exit 2; fi
-if ! is_pos_int "$T"; then echo "Invalid -t/THREADS: $T" >&2; exit 2; fi
+if ! is_pos_int "$D"; then echo "Invalid duration: $D" >&2; exit 2; fi
+if ! is_pos_int "$T"; then echo "Invalid threads: $T" >&2; exit 2; fi
 if ! is_pos_int "$DEPTH"; then echo "Invalid DEPTH: $DEPTH" >&2; exit 2; fi
+if [ "$NET_INFO" != "0" ] && [ "$NET_INFO" != "1" ]; then echo "Invalid NET_INFO: $NET_INFO" >&2; exit 2; fi
+if [ "$NETWORK" != "0" ] && [ "$NETWORK" != "1" ]; then echo "Invalid NETWORK: $NETWORK" >&2; exit 2; fi
+
 if [ -n "$JOBS_ENV" ]; then
   JOBS="$JOBS_ENV"
 else
@@ -70,16 +133,38 @@ if ! is_pos_int "$JOBS"; then echo "Invalid JOBS: $JOBS" >&2; exit 2; fi
 mkdir -p "$LOGDIR" "$DIR"
 printf 'Metric\tResult\n' > "$RESULTS"
 
+have() { command -v "$1" >/dev/null 2>&1; }
+
+sudo_cmd() {
+  if [ "${EUID:-$(id -u)}" -eq 0 ]; then
+    "$@"
+  elif have sudo; then
+    sudo -n "$@"
+  else
+    return 1
+  fi
+}
+
+human_kib() {
+  awk -v kib="${1:-0}" 'BEGIN {
+    n=kib+0; split("KiB MiB GiB TiB PiB", u, " "); i=1;
+    while (n >= 1024 && i < 5) { n/=1024; i++ }
+    if (i == 1) printf "%.0f %s", n, u[i]; else printf "%.1f %s", n, u[i]
+  }'
+}
+
 auto_size() {
   local avail_kb avail_mib target_mib
   avail_kb="$(df -Pk "$DIR" 2>/dev/null | awk 'NR==2 {print $4+0}')"
   avail_mib=$(( ${avail_kb:-0} / 1024 ))
 
   # Default: about 1/10 free disk, bounded for sane one-line VPS runs.
-  # Floor: 512M. Cap: 8G. Rounded down to a common fio size.
+  # Floor: 512M. Cap: default 1G, full 8G. Rounded down to a common fio size.
+  local cap_mib=1024
+  [ "$PROFILE" = "full" ] && cap_mib=8192
   target_mib=$(( avail_mib / 10 ))
   [ "$target_mib" -lt 512 ] && target_mib=512
-  [ "$target_mib" -gt 8192 ] && target_mib=8192
+  [ "$target_mib" -gt "$cap_mib" ] && target_mib="$cap_mib"
 
   if [ "$target_mib" -lt 1024 ]; then
     printf '512M\n'
@@ -97,18 +182,6 @@ auto_size() {
 if [ "$SIZE" = "auto" ]; then
   SIZE="$(auto_size)"
 fi
-
-have() { command -v "$1" >/dev/null 2>&1; }
-
-sudo_cmd() {
-  if [ "${EUID:-$(id -u)}" -eq 0 ]; then
-    "$@"
-  elif have sudo; then
-    sudo -n "$@"
-  else
-    return 1
-  fi
-}
 
 find_fio_bin() {
   local p
@@ -132,6 +205,9 @@ missing_tools() {
   have sysbench || missing+=(sysbench)
   have_fio || missing+=(fio)
   have python3 || missing+=(python3)
+  if [ "$NETWORK" = "1" ]; then
+    have curl || missing+=(curl)
+  fi
   printf '%s\n' "${missing[@]}"
 }
 
@@ -141,29 +217,32 @@ install_tools() {
   [ -z "$missing" ] && return 0
 
   if [ "$INSTALL" != "1" ]; then
+    MISSING_AFTER_INSTALL="$missing"
     return 0
   fi
 
+  INSTALL_ATTEMPTED="1"
   echo "Missing tools: $missing"
-  echo "Installing missing tools when possible... use -n to skip installation."
+  echo "Installing missing tools when possible... use -n/--no-install to skip installation."
 
   if have apt-get; then
     sudo_cmd env DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null 2>"$LOGDIR/install-apt-update.err" || true
-    sudo_cmd env DEBIAN_FRONTEND=noninteractive apt-get install -y sysbench fio python3 ca-certificates procps \
+    sudo_cmd env DEBIAN_FRONTEND=noninteractive apt-get install -y sysbench fio python3 curl ca-certificates procps \
       >"$LOGDIR/install-apt.log" 2>"$LOGDIR/install-apt.err" || true
   elif have dnf; then
-    sudo_cmd dnf install -y sysbench fio python3 procps-ng >"$LOGDIR/install-dnf.log" 2>"$LOGDIR/install-dnf.err" || true
+    sudo_cmd dnf install -y sysbench fio python3 curl procps-ng >"$LOGDIR/install-dnf.log" 2>"$LOGDIR/install-dnf.err" || true
   elif have yum; then
     sudo_cmd yum install -y epel-release >"$LOGDIR/install-yum-epel.log" 2>"$LOGDIR/install-yum-epel.err" || true
-    sudo_cmd yum install -y sysbench fio python3 procps-ng >"$LOGDIR/install-yum.log" 2>"$LOGDIR/install-yum.err" || true
+    sudo_cmd yum install -y sysbench fio python3 curl procps-ng >"$LOGDIR/install-yum.log" 2>"$LOGDIR/install-yum.err" || true
   elif have pacman; then
-    sudo_cmd pacman -Sy --noconfirm sysbench fio python procps >"$LOGDIR/install-pacman.log" 2>"$LOGDIR/install-pacman.err" || true
+    sudo_cmd pacman -Sy --noconfirm sysbench fio python curl procps >"$LOGDIR/install-pacman.log" 2>"$LOGDIR/install-pacman.err" || true
   elif have apk; then
-    sudo_cmd apk add --no-cache sysbench fio python3 procps >"$LOGDIR/install-apk.log" 2>"$LOGDIR/install-apk.err" || true
+    sudo_cmd apk add --no-cache sysbench fio python3 curl procps >"$LOGDIR/install-apk.log" 2>"$LOGDIR/install-apk.err" || true
   fi
 
   have_fio || true
   missing="$(missing_tools | xargs 2>/dev/null || true)"
+  MISSING_AFTER_INSTALL="$missing"
   [ -z "$missing" ] || echo "Still missing after install attempt: $missing; affected tests will be skipped."
 }
 
@@ -354,7 +433,6 @@ missing = []
 single = first_num(metric('CPU single thread'))
 all_cpu = first_num(metric('CPU all threads'))
 if single and all_cpu and threads > 0:
-    # Baseline: ~400 sysbench events/s per thread ≈ score 1000.
     per_thread = all_cpu / threads
     cpu = 1000 * math.sqrt((single / 400.0) * (per_thread / 400.0))
     components.append(('cpu', clamp(cpu), 0.40))
@@ -364,7 +442,6 @@ else:
 mem_read = first_num(metric('Memory read'))
 mem_write = first_num(metric('Memory write'))
 if mem_read and mem_write:
-    # Baseline: 30 GiB/s read + 20 GiB/s write ≈ score 1000.
     mem = 1000 * math.sqrt((mem_read / 30000.0) * (mem_write / 20000.0))
     components.append(('mem', clamp(mem), 0.15))
 else:
@@ -373,7 +450,6 @@ else:
 qd1_read = first_num(metric('Disk random read 4K QD1'))
 qd1_write = first_num(metric('Disk random write 4K QD1'))
 if qd1_read and qd1_write:
-    # Baseline: 10k read IOPS + 5k write IOPS at QD1 ≈ score 1000.
     disk = 1000 * math.sqrt((qd1_read / 10000.0) * (qd1_write / 5000.0))
     components.append(('disk', clamp(disk), 0.30))
 else:
@@ -381,7 +457,6 @@ else:
 
 fsync = first_num(metric('Disk durable write 4K fsync'))
 if fsync:
-    # Baseline: 2k durable 4K writes/s ≈ score 1000.
     dur = 1000 * math.sqrt(fsync / 2000.0)
     components.append(('fsync', clamp(dur), 0.15))
 else:
@@ -395,40 +470,328 @@ total_w = sum(w for _, _, w in components)
 score = round(sum(v * w for _, v, w in components) / total_w)
 parts = ','.join(name for name, _, _ in components)
 if missing:
-    print(f'{score} partial ({parts}; missing {",".join(missing)})')
+    print(f'PARTIAL - not comparable: {score} ({parts}; missing {",".join(missing)})')
 else:
-    print(f'{score} ({parts})')
+    print(f'FULL {score} ({parts})')
+PY
+}
+
+abs_verdict() {
+  python3 - "$SCORE_TEXT" "$RESULTS" <<'PY'
+import csv, re, sys
+score_text, results = sys.argv[1], sys.argv[2]
+if score_text.startswith('PARTIAL') or score_text == 'n/a':
+    print('INCOMPLETE - missing required benchmark sections')
+    raise SystemExit
+m = re.search(r'FULL\s+(\d+)', score_text)
+score = int(m.group(1)) if m else 0
+rows = {}
+try:
+    with open(results, newline='', encoding='utf-8', errors='replace') as f:
+        for row in csv.reader(f, delimiter='\t'):
+            if len(row) >= 2 and row[0] != 'Metric': rows[row[0]] = row[1]
+except Exception:
+    pass
+
+def num(prefix):
+    for k, v in rows.items():
+        if k.startswith(prefix):
+            mm = re.search(r'[0-9]+(?:\.[0-9]+)?', v)
+            return float(mm.group(0)) if mm else None
+    return None
+fsync = num('Disk durable write 4K fsync')
+if score >= 1200:
+    verdict = 'KEEP'
+elif score >= 800:
+    verdict = 'MAYBE'
+else:
+    verdict = 'AVOID'
+why = []
+if fsync is not None and fsync < 500:
+    why.append('weak durable-write/fsync')
+if why:
+    print(f'{verdict} - {"; ".join(why)}')
+else:
+    print(f'{verdict} - practical VPS profile looks acceptable')
+PY
+}
+
+check_ip() {
+  local version="$1"
+  if [ "$NET_INFO" != "1" ]; then
+    printf 'skipped'
+    return 0
+  fi
+  if have ping && ping -"$version" -c 1 -W 3 google.com >/dev/null 2>&1; then
+    printf 'online'
+    return 0
+  fi
+  if have curl && curl -"$version" -fsS --max-time 4 https://icanhazip.com >/dev/null 2>&1; then
+    printf 'online'
+    return 0
+  fi
+  printf 'offline/unknown'
+}
+
+ip_info_summary() {
+  if [ "$NET_INFO" != "1" ]; then
+    printf 'skipped'
+    return 0
+  fi
+  if ! have curl; then
+    printf 'curl missing'
+    return 0
+  fi
+  local response
+  response="$(curl -fsS --max-time 4 http://ip-api.com/json/ 2>/dev/null || true)"
+  if [ -z "$response" ]; then
+    printf 'unavailable'
+    return 0
+  fi
+  if have python3; then
+    IPINFO_RESPONSE="$response" python3 - <<'PY'
+import json, os
+try:
+    d=json.loads(os.environ.get('IPINFO_RESPONSE',''))
+except Exception:
+    print('unavailable'); raise SystemExit
+parts=[]
+for key in ('isp','as','city','country'):
+    val=d.get(key)
+    if val: parts.append(str(val))
+print(' | '.join(parts) if parts else 'unavailable')
+PY
+  else
+    printf 'available; python3 missing for parse'
+  fi
+}
+
+network_sanity() {
+  if [ "$NETWORK" != "1" ]; then
+    add "Network sanity" "skipped; use --network to run HTTP checks"
+    return 0
+  fi
+  if ! have curl; then
+    add "Network sanity" "curl not installed; skipped"
+    return 0
+  fi
+
+  local lat down up
+  if lat="$(curl -fL -sS --max-time 8 -o /dev/null -w '%{time_starttransfer}' 'https://speed.cloudflare.com/__down?bytes=0' 2>"$LOGDIR/net-ttfb.err")" && awk -v x="$lat" 'BEGIN{exit !(x+0>0)}'; then
+    add "Network Cloudflare TTFB" "$(awk -v s="$lat" 'BEGIN{printf "%.2f ms", s*1000}')"
+  else
+    add "Network Cloudflare TTFB" "FAILED; see $LOGDIR/net-ttfb.err"
+  fi
+
+  if down="$(curl -fL -sS --max-time 20 -o /dev/null -w '%{speed_download}' 'https://speed.cloudflare.com/__down?bytes=25000000' 2>"$LOGDIR/net-down.err")" && awk -v x="$down" 'BEGIN{exit !(x+0>0)}'; then
+    add "Network Cloudflare download" "$(awk -v b="$down" 'BEGIN{printf "%.2f Mbps", b*8/1000000}')"
+  else
+    add "Network Cloudflare download" "FAILED; see $LOGDIR/net-down.err"
+  fi
+
+  if up="$(head -c 10000000 /dev/zero | curl -fL -sS --max-time 20 -o /dev/null -w '%{speed_upload}' -X POST --data-binary @- 'https://speed.cloudflare.com/__up' 2>"$LOGDIR/net-up.err")" && awk -v x="$up" 'BEGIN{exit !(x+0>0)}'; then
+    add "Network Cloudflare upload" "$(awk -v b="$up" 'BEGIN{printf "%.2f Mbps", b*8/1000000}')"
+  else
+    add "Network Cloudflare upload" "FAILED; see $LOGDIR/net-up.err"
+  fi
+}
+
+dd_fallback() {
+  if ! have dd; then
+    add "Disk fallback dd" "dd not installed; skipped"
+    return 0
+  fi
+  local dd_file="$DIR/abs-dd.test"
+  local write_log="$LOGDIR/dd-write.log"
+  local read_log="$LOGDIR/dd-read.log"
+  rm -f "$dd_file" 2>/dev/null || true
+  if dd if=/dev/zero of="$dd_file" bs=64M count=4 oflag=direct conv=fdatasync >"$write_log" 2>&1; then
+    add "Disk fallback dd write" "$(awk 'END{print}' "$write_log") (not scored)"
+  elif dd if=/dev/zero of="$dd_file" bs=64M count=4 conv=fdatasync >"$write_log" 2>&1; then
+    add "Disk fallback dd write" "$(awk 'END{print}' "$write_log") (buffered; not scored)"
+  else
+    add "Disk fallback dd write" "FAILED; see $write_log"
+  fi
+  if [ -f "$dd_file" ]; then
+    if dd if="$dd_file" of=/dev/null bs=64M iflag=direct >"$read_log" 2>&1; then
+      add "Disk fallback dd read" "$(awk 'END{print}' "$read_log") (not scored)"
+    elif dd if="$dd_file" of=/dev/null bs=64M >"$read_log" 2>&1; then
+      add "Disk fallback dd read" "$(awk 'END{print}' "$read_log") (buffered; not scored)"
+    else
+      add "Disk fallback dd read" "FAILED; see $read_log"
+    fi
+  fi
+  rm -f "$dd_file" 2>/dev/null || true
+}
+
+json_report() {
+  [ -n "$JSON_FILE" ] && mkdir -p "$(dirname "$JSON_FILE")" 2>/dev/null || true
+  ABS_JSON_TARGET="$JSON_RESULT" \
+  ABS_JSON_COPY="$JSON_FILE" \
+  ABS_VERSION="$VERSION" ABS_PROFILE="$PROFILE" ABS_TARGET="$PROFILE_TARGET" \
+  ABS_START_UTC="$TIME_START_UTC" ABS_END_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  ABS_ELAPSED="$ELAPSED_SECONDS" ABS_HOST="$HOST" ABS_DISTRO="$DISTRO" ABS_KERNEL="$KERNEL" \
+  ABS_CPU_MODEL="$CPU_MODEL" ABS_CPU_CORES="$CPU_CORES" ABS_CPU_FREQ="$CPU_FREQ" \
+  ABS_AES_NI="$AES_NI" ABS_CPU_VIRT="$CPU_VIRT" ABS_RAM_KIB="$RAM_KIB" ABS_SWAP_KIB="$SWAP_KIB" \
+  ABS_DISK_TOTAL_KB="$DISK_TOTAL_KB" ABS_DISK_FREE_KB="$DISK_FREE_KB" ABS_VM_TYPE="$VM_TYPE" \
+  ABS_IPV4="$IPV4_STATUS" ABS_IPV6="$IPV6_STATUS" ABS_IP_INFO="$IP_INFO" \
+  ABS_THREADS="$T" ABS_DURATION="$D" ABS_SIZE="$SIZE" ABS_INSTALL="$INSTALL" ABS_INSTALL_ATTEMPTED="$INSTALL_ATTEMPTED" \
+  ABS_MISSING_TOOLS="$MISSING_AFTER_INSTALL" ABS_DIRECT="$DIRECT" ABS_FIO_ENGINE="$FIO_ENGINE" \
+  ABS_JOBS="$JOBS" ABS_DEPTH="$DEPTH" ABS_SCORE="$SCORE_TEXT" ABS_VERDICT="$VERDICT_TEXT" \
+  python3 - "$RESULTS" <<'PY'
+import csv, json, os, re, shutil, sys
+results_path = sys.argv[1]
+rows = []
+try:
+    with open(results_path, newline='', encoding='utf-8', errors='replace') as f:
+        for row in csv.reader(f, delimiter='\t'):
+            if len(row) >= 2 and row[0] != 'Metric':
+                rows.append({'metric': row[0], 'result': row[1]})
+except Exception:
+    pass
+
+def env(name, default=''):
+    return os.environ.get(name, default)
+
+def env_int(name):
+    try: return int(float(env(name, '0') or 0))
+    except Exception: return 0
+score_text = env('ABS_SCORE')
+score_status = 'none'
+score_value = None
+missing_components = []
+if score_text.startswith('FULL'):
+    score_status = 'full'
+    m = re.search(r'FULL\s+(\d+)', score_text)
+    if m: score_value = int(m.group(1))
+elif score_text.startswith('PARTIAL'):
+    score_status = 'partial'
+    m = re.search(r':\s*(\d+)', score_text)
+    if m: score_value = int(m.group(1))
+    mm = re.search(r'missing ([^)]+)\)', score_text)
+    if mm: missing_components = [x for x in mm.group(1).split(',') if x]
+verdict_text = env('ABS_VERDICT')
+verdict_code = verdict_text.split(' ', 1)[0] if verdict_text else 'UNKNOWN'
+verdict_reason = verdict_text.split(' - ', 1)[1] if ' - ' in verdict_text else verdict_text
+out = {
+    'version': env('ABS_VERSION'),
+    'profile': env('ABS_PROFILE'),
+    'target_time': env('ABS_TARGET'),
+    'started_utc': env('ABS_START_UTC'),
+    'ended_utc': env('ABS_END_UTC'),
+    'elapsed_seconds': env_int('ABS_ELAPSED'),
+    'system': {
+        'host': env('ABS_HOST'), 'distro': env('ABS_DISTRO'), 'kernel': env('ABS_KERNEL'),
+        'cpu_model': env('ABS_CPU_MODEL'), 'cpu_cores': env('ABS_CPU_CORES'), 'cpu_freq': env('ABS_CPU_FREQ'),
+        'aes_ni': env('ABS_AES_NI') == 'enabled', 'cpu_virtualization': env('ABS_CPU_VIRT') == 'enabled',
+        'ram_kib': env_int('ABS_RAM_KIB'), 'swap_kib': env_int('ABS_SWAP_KIB'),
+        'disk_total_kb': env_int('ABS_DISK_TOTAL_KB'), 'disk_free_kb': env_int('ABS_DISK_FREE_KB'),
+        'vm_type': env('ABS_VM_TYPE'),
+    },
+    'network_identity': {'ipv4': env('ABS_IPV4'), 'ipv6': env('ABS_IPV6'), 'ip_info': env('ABS_IP_INFO')},
+    'mode': {
+        'threads': env_int('ABS_THREADS'), 'duration_seconds': env_int('ABS_DURATION'), 'fio_size': env('ABS_SIZE'),
+        'install': env('ABS_INSTALL') == '1', 'install_attempted': env('ABS_INSTALL_ATTEMPTED') == '1',
+        'missing_tools': env('ABS_MISSING_TOOLS'), 'direct': env('ABS_DIRECT'), 'fio_engine': env('ABS_FIO_ENGINE'),
+        'pressure_jobs': env_int('ABS_JOBS'), 'pressure_depth': env_int('ABS_DEPTH'),
+    },
+    'score': {
+        'text': score_text,
+        'status': score_status,
+        'value': score_value,
+        'comparable': score_status == 'full',
+        'missing_components': missing_components,
+    },
+    'verdict': {'text': verdict_text, 'code': verdict_code, 'reason': verdict_reason},
+    'results': rows,
+}
+target = env('ABS_JSON_TARGET')
+with open(target, 'w', encoding='utf-8') as f:
+    json.dump(out, f, ensure_ascii=False, indent=2)
+    f.write('\n')
+copy = env('ABS_JSON_COPY')
+if copy:
+    try:
+        shutil.copyfile(target, copy)
+    except Exception as e:
+        print(f'warning: could not copy JSON to {copy}: {e}', file=sys.stderr)
+print(target)
 PY
 }
 
 cleanup() {
-  rm -f "$FIO_FILE" "$FIO_FILE".* 2>/dev/null || true
+  rm -f "$FIO_FILE" "$FIO_FILE".* "$DIR/abs-dd.test" 2>/dev/null || true
 }
 trap cleanup EXIT
+
+if [ "$NET_INFO" = "1" ]; then
+  echo "Network info lookup enabled: checks IPv4/IPv6 and external IP/ASN. Use --no-net-info to skip."
+fi
+if [ "$NETWORK" = "1" ]; then
+  echo "Network sanity enabled: downloads 25 MB and uploads 10 MB of zero data to Cloudflare. No result upload."
+fi
 
 install_tools
 have_fio || true
 
+HOST="$(hostname 2>/dev/null || true)"
+KERNEL="$(uname -srmo 2>/dev/null || uname -a 2>/dev/null || echo unknown)"
+DISTRO="$(awk -F= '/^PRETTY_NAME=/ {gsub(/^"|"$/, "", $2); print $2; exit}' /etc/os-release 2>/dev/null || echo unknown)"
+UPTIME_TEXT="$(uptime -p 2>/dev/null | sed 's/^up //' || awk '{printf "%s seconds", int($1)}' /proc/uptime 2>/dev/null || echo unknown)"
+CPU_MODEL="$(awk -F: '/model name/ {gsub(/^[ \t]+/, "", $2); print $2; exit}' /proc/cpuinfo 2>/dev/null || lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^[ \t]+/, "", $2); print $2; exit}' || echo unknown)"
+CPU_CORES="$(awk -F: '/model name/ {core++} END {print core+0}' /proc/cpuinfo 2>/dev/null || echo "$VCPU")"
+[ "${CPU_CORES:-0}" = "0" ] && CPU_CORES="$VCPU"
+CPU_FREQ="$(awk -F: '/cpu MHz/ {freq=$2} END {gsub(/^[ \t]+/, "", freq); if (freq) print freq " MHz"}' /proc/cpuinfo 2>/dev/null || echo unknown)"
+AES_NI="$(grep -qiE '(^| )aes( |$)' /proc/cpuinfo 2>/dev/null && echo enabled || echo disabled)"
+CPU_VIRT="$(grep -qiE '(^| )(vmx|svm)( |$)' /proc/cpuinfo 2>/dev/null && echo enabled || echo disabled)"
+RAM_KIB="$(free 2>/dev/null | awk '/^Mem:/ {print $2+0}' || echo 0)"
+SWAP_KIB="$(free 2>/dev/null | awk '/^Swap:/ {print $2+0}' || echo 0)"
+RAM_TEXT="$(human_kib "$RAM_KIB")"
+SWAP_TEXT="$(human_kib "$SWAP_KIB")"
+DISK_FREE_KB="$(df -Pk "$DIR" 2>/dev/null | awk 'NR==2 {print $4+0}' || echo 0)"
+DISK_TOTAL_KB="$(df -Pk "$DIR" 2>/dev/null | awk 'NR==2 {print $2+0}' || echo 0)"
+DISK_TEXT="$(human_kib "$DISK_FREE_KB") free / $(human_kib "$DISK_TOTAL_KB") total"
+VM_TYPE="$(systemd-detect-virt 2>/dev/null || echo unknown)"
+
+IPV4_STATUS="$(check_ip 4)"
+IPV6_STATUS="$(check_ip 6)"
+IP_INFO="$(ip_info_summary)"
+
 cat <<EOF
 # ABS v$VERSION
+Profile  : $PROFILE ($PROFILE_TARGET)
 Date UTC : $(date -u)
-Host     : $(hostname 2>/dev/null || true)
-Kernel   : $(uname -srmo)
-CPU      : $(awk -F: '/model name/ {gsub(/^[ \t]+/, "", $2); print $2; exit}' /proc/cpuinfo 2>/dev/null || echo unknown)
+Host     : $HOST
+Uptime   : $UPTIME_TEXT
+Distro   : $DISTRO
+Kernel   : $KERNEL
+CPU      : $CPU_MODEL
+CPU cores: $CPU_CORES @ $CPU_FREQ
+AES-NI   : $AES_NI
+VM-x/SVM : $CPU_VIRT
 vCPU     : $VCPU
 Threads  : $T
-RAM      : $(free -h 2>/dev/null | awk '/^Mem:/ {print $2}' || echo unknown)
-Disk     : $(df -h "$DIR" 2>/dev/null | awk 'NR==2 {print $4 " free on " $1}' || echo unknown)
+RAM      : $RAM_TEXT
+Swap     : $SWAP_TEXT
+Disk     : $DISK_TEXT on $DIR
+VM Type  : $VM_TYPE
+IPv4/IPv6: $IPV4_STATUS / $IPV6_STATUS
+IP info  : $IP_INFO
 Fio size : $SIZE
-Mode     : install=$INSTALL, direct=$DIRECT, fio_engine=$FIO_ENGINE, pressure_jobs=$JOBS, pressure_depth=$DEPTH
-Duration : ${D}s/test
-Tools    : sysbench=$(sysbench --version 2>/dev/null | awk '{print $2}' || echo no), fio=$([ -n "$FIO_BIN" ] && "$FIO_BIN" --version 2>/dev/null || echo no), python3=$(python3 --version 2>/dev/null | awk '{print $2}' || echo no)
+Mode     : install=$INSTALL, direct=$DIRECT, fio_engine=$FIO_ENGINE, pressure_jobs=$JOBS, pressure_depth=$DEPTH, network=$NETWORK
+Duration : ${D}s/timed test
+Tools    : sysbench=$(sysbench --version 2>/dev/null | awk '{print $2}' || echo no), fio=$([ -n "$FIO_BIN" ] && "$FIO_BIN" --version 2>/dev/null || echo no), python3=$(python3 --version 2>/dev/null | awk '{print $2}' || echo no), curl=$(curl --version 2>/dev/null | awk 'NR==1{print $2}' || echo no)
 Logs     : $LOGDIR
 EOF
 
-echo
-printf '%-48s %s\n' "Metric" "Result"
+printf '\n%-48s %s\n' "Metric" "Result"
 printf '%-48s %s\n' "------" "------"
+
+if [ "$INSTALL_ATTEMPTED" = "1" ]; then
+  add "Install mode" "package install attempted before benchmark; use -n for no-mutation mode"
+else
+  add "Install mode" "no package install attempted"
+fi
 
 if have sysbench; then
   if run_log cpu-1t sysbench cpu --threads=1 --time="$D" --events=0 --percentile=95 --cpu-max-prime="$CPU_PRIME" run; then
@@ -472,6 +835,7 @@ if [ -n "$FIO_BIN" ] && have python3; then
 
     if ! fio_run fio-prepare prepare 1M 1 1; then
       add "fio prepare" "FAILED; see $LOGDIR/fio-prepare.err"
+      dd_fallback
     else
       if fio_run fio-seq-write write 1M 1 1 --end_fsync=1; then
         add "Disk sequential write" "$(fio_metric write_mib) MiB/s, p95 $(fio_metric write_p95_ms) ms"
@@ -524,17 +888,39 @@ if [ -n "$FIO_BIN" ] && have python3; then
   fi
 else
   add "fio disk tests" "fio or python3 not installed; skipped"
+  dd_fallback
 fi
 
+network_sanity
+
 if have python3; then
-  add "ABS score" "$(abs_score)"
+  SCORE_TEXT="$(abs_score)"
+  add "ABS score" "$SCORE_TEXT"
+  VERDICT_TEXT="$(abs_verdict)"
+  add "ABS verdict" "$VERDICT_TEXT"
 else
-  add "ABS score" "n/a (python3 missing)"
+  SCORE_TEXT="n/a (python3 missing)"
+  VERDICT_TEXT="INCOMPLETE - python3 missing"
+  add "ABS score" "$SCORE_TEXT"
+  add "ABS verdict" "$VERDICT_TEXT"
 fi
-add_note "Score note" "ABS score is internal; not Geekbench/YABS-compatible."
+add_note "Score note" "FULL scores require CPU, memory, disk QD1, and fsync. PARTIAL is not comparable."
+add_note "Privacy note" "No result upload. --network downloads 25 MB and uploads 10 MB of zero data to Cloudflare; --no-net-info skips IP/ASN lookup."
+
+ELAPSED_SECONDS=$(( $(date +%s) - TIME_START_EPOCH ))
+if have python3; then
+  JSON_WRITTEN="$(json_report)"
+  add_note "JSON result" "$JSON_WRITTEN"
+  [ -n "$JSON_FILE" ] && add_note "JSON copy" "$JSON_FILE"
+  if [ "$JSON_PRINT" = "1" ]; then
+    printf '\nJSON:\n'
+    python3 -m json.tool "$JSON_RESULT" 2>/dev/null || true
+  fi
+else
+  add_note "JSON result" "n/a (python3 missing)"
+fi
 
 trap - EXIT
 cleanup
 
-echo
-echo "Done. TSV summary: $RESULTS"
+printf '\nCompleted in %dm %02ds. TSV summary: %s\n' $((ELAPSED_SECONDS / 60)) $((ELAPSED_SECONDS % 60)) "$RESULTS"
