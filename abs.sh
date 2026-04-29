@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 export LC_ALL=C
 
-VERSION="0.4.5"
+VERSION="0.4.6"
 TIME_START_EPOCH="$(date +%s)"
 TIME_START_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 VCPU="$(nproc 2>/dev/null || echo 1)"
@@ -1170,20 +1170,20 @@ if have python3; then
   LOCAL_SCORE_TEXT="$(abs_local_score)"
   NETWORK_SCORE_TEXT="$(network_score)"
   SCORE_TEXT="$(abs_score)"
-  add "ABS score" "$SCORE_TEXT"
+  add "ABS SCORE" "$SCORE_TEXT"
   add "Local component" "$LOCAL_SCORE_TEXT"
   add "Network component" "$NETWORK_SCORE_TEXT"
   VERDICT_TEXT="$(abs_verdict)"
-  add "ABS verdict" "$VERDICT_TEXT"
+  add "ABS VERDICT" "$VERDICT_TEXT"
 else
   SCORE_TEXT="n/a (python3 missing)"
   LOCAL_SCORE_TEXT="n/a (python3 missing)"
   NETWORK_SCORE_TEXT="n/a (python3 missing)"
   VERDICT_TEXT="INCOMPLETE - python3 missing"
-  add "ABS score" "$SCORE_TEXT"
+  add "ABS SCORE" "$SCORE_TEXT"
   add "Local component" "$LOCAL_SCORE_TEXT"
   add "Network component" "$NETWORK_SCORE_TEXT"
-  add "ABS verdict" "$VERDICT_TEXT"
+  add "ABS VERDICT" "$VERDICT_TEXT"
 fi
 add_note "Score note" "ABS score includes network: 80% local CPU/memory/disk/fsync + 20% network. Default network is Cloudflare sanity; --network-full adds 3 public iperf3 regions; --network-yabs uses the YABS list. Use --no-network only for a non-comparable local-only run."
 add_note "Privacy note" "No result upload. Default network sanity uses Cloudflare (25 MB down, 10 MB zero-data up); package install may contact distro mirrors unless -n is used. --net-info calls IP/ASN endpoints; --no-network skips speed checks."
@@ -1200,6 +1200,13 @@ if have python3; then
 else
   add_note "JSON result" "n/a (python3 missing)"
 fi
+
+printf '\n%s\n' "==================== ABS RESULT ===================="
+printf 'SCORE   : %s\n' "$SCORE_TEXT"
+printf 'VERDICT : %s\n' "$VERDICT_TEXT"
+printf 'LOCAL   : %s\n' "$LOCAL_SCORE_TEXT"
+printf 'NETWORK : %s\n' "$NETWORK_SCORE_TEXT"
+printf '%s\n' "===================================================="
 
 trap - EXIT
 cleanup
