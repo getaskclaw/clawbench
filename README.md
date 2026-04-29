@@ -58,11 +58,11 @@ Default ABS intentionally runs shorter than YABS. It favors useful signal over e
 | Durable write | `fio` 4K random write with `fsync=1`, including sync p95 when fio reports it |
 | Fallback disk | small `dd` sequential fallback if fio is unavailable; not scored |
 | Network sanity | default Cloudflare HTTP check with separate network sanity score: about 25 MB download plus 10 MB zero-data upload; `--no-network` skips it |
-| ABS score/verdict | internal local score plus `KEEP` / `MAYBE` / `AVOID` / `INCOMPLETE` verdict; network is shown separately |
+| ABS local score/verdict | internal local CPU/memory/disk/fsync score plus `KEEP` / `MAYBE` / `AVOID` / `INCOMPLETE` verdict; network is shown separately as `Network sanity score` |
 
 ## Score and verdict
 
-ABS score is **not Geekbench** and **not YABS-compatible**. It is an internal same-tool convenience score for local CPU, memory, and disk. Network is reported as a separate sanity score, not mixed into ABS score.
+`ABS local score` is **not Geekbench** and **not YABS-compatible**. It is an internal same-tool convenience score for local CPU, memory, disk, and fsync. Network is reported as a separate `Network sanity score`, not mixed into the local score.
 
 Rough weighting:
 
@@ -74,7 +74,7 @@ Rough weighting:
 A full score requires CPU, memory, disk QD1, and fsync. If any core section is missing, ABS prints:
 
 ```text
-PARTIAL - not comparable
+ABS local score: PARTIAL - not comparable
 ABS verdict: INCOMPLETE
 ```
 

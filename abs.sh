@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 export LC_ALL=C
 
-VERSION="0.4.2"
+VERSION="0.4.3"
 TIME_START_EPOCH="$(date +%s)"
 TIME_START_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 VCPU="$(nproc 2>/dev/null || echo 1)"
@@ -480,9 +480,9 @@ total_w = sum(w for _, _, w in components)
 score = round(sum(v * w for _, v, w in components) / total_w)
 parts = ','.join(name for name, _, _ in components)
 if missing:
-    print(f'PARTIAL - not comparable: {score} ({parts}; missing {",".join(missing)})')
+    print(f'PARTIAL - not comparable: {score} (local only: {parts}; missing {",".join(missing)}; network excluded)')
 else:
-    print(f'FULL {score} ({parts})')
+    print(f'FULL {score} (local only: {parts}; network excluded)')
 PY
 }
 
@@ -527,7 +527,7 @@ lat_component = min(3.0, max(0.1, 100.0 / max(lat, 1.0)))
 down_component = min(3.0, max(0.1, down / 100.0))
 up_component = min(3.0, max(0.1, up / 50.0))
 score = round(1000 * (lat_component * down_component * up_component) ** (1/3))
-print(f'SANITY {score} (Cloudflare HTTP; not in ABS local score)')
+print(f'SANITY {score} (Cloudflare HTTP; separate from ABS local score)')
 PY
 }
 
@@ -728,7 +728,7 @@ elif score_text.startswith('PARTIAL'):
     score_status = 'partial'
     m = re.search(r':\s*(\d+)', score_text)
     if m: score_value = int(m.group(1))
-    mm = re.search(r'missing ([^)]+)\)', score_text)
+    mm = re.search(r'missing ([^;)]*)', score_text)
     if mm: missing_components = [x for x in mm.group(1).split(',') if x]
 verdict_text = env('ABS_VERDICT')
 network_score_text = env('ABS_NETWORK_SCORE')
@@ -759,6 +759,8 @@ out = {
     },
     'score': {
         'text': score_text,
+        'scope': 'local_cpu_memory_disk_fsync',
+        'excludes_network': True,
         'status': score_status,
         'value': score_value,
         'comparable': score_status == 'full',
@@ -961,20 +963,20 @@ network_sanity
 
 if have python3; then
   SCORE_TEXT="$(abs_score)"
-  add "ABS score" "$SCORE_TEXT"
+  add "ABS local score" "$SCORE_TEXT"
   NETWORK_SCORE_TEXT="$(network_score)"
-  add "Network score" "$NETWORK_SCORE_TEXT"
+  add "Network sanity score" "$NETWORK_SCORE_TEXT"
   VERDICT_TEXT="$(abs_verdict)"
   add "ABS verdict" "$VERDICT_TEXT"
 else
   SCORE_TEXT="n/a (python3 missing)"
   NETWORK_SCORE_TEXT="n/a (python3 missing)"
   VERDICT_TEXT="INCOMPLETE - python3 missing"
-  add "ABS score" "$SCORE_TEXT"
-  add "Network score" "$NETWORK_SCORE_TEXT"
+  add "ABS local score" "$SCORE_TEXT"
+  add "Network sanity score" "$NETWORK_SCORE_TEXT"
   add "ABS verdict" "$VERDICT_TEXT"
 fi
-add_note "Score note" "ABS local score excludes network. FULL requires CPU, memory, disk QD1, and fsync; PARTIAL is not comparable."
+add_note "Score note" "ABS local score is CPU/memory/disk/fsync only; network is a separate sanity score. FULL requires CPU, memory, disk QD1, and fsync; PARTIAL is not comparable."
 add_note "Privacy note" "No result upload. Default network sanity uses Cloudflare (25 MB down, 10 MB zero-data up); package install may contact distro mirrors unless -n is used. --net-info calls IP/ASN endpoints; --no-network skips speed checks."
 
 ELAPSED_SECONDS=$(( $(date +%s) - TIME_START_EPOCH ))
