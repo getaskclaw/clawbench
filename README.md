@@ -1,117 +1,123 @@
 # ClawBench
 
-A small, dependency-light VPS benchmark and inventory script from AskClaw.
+A small YABS-style VPS benchmark from AskClaw.
 
-ClawBench is a practical alternative to heavyweight one-shot benchmark scripts such as YABS when you want:
+ClawBench is for quick VPS sanity checks and provider comparisons when you want:
 
-- readable output for humans,
-- machine-readable JSON for agents/automation,
-- no package installation by default,
-- conservative disk tests that clean up after themselves,
-- clear disclosure of what was measured.
-
-It is intended for quick VPS sanity checks, provider comparisons, migration notes, and reproducible server inventory.
+- one-line run, readable results immediately,
+- CPU and memory via `sysbench`,
+- disk throughput/IOPS/latency via `fio`,
+- conservative auto sizing that cleans up after itself,
+- clear disclosure of benchmark mode and logs.
 
 ## Quick start
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/getaskclaw/clawbench/main/bin/clawbench.py | python3
+curl -fsSL https://raw.githubusercontent.com/getaskclaw/clawbench/main/bin/clawbench.sh | bash
 ```
 
-Save JSON as well as the Markdown report:
+With `wget`:
 
 ```bash
-python3 bin/clawbench.py --json result.json --output report.md
+wget -qO- https://raw.githubusercontent.com/getaskclaw/clawbench/main/bin/clawbench.sh | bash
 ```
 
-Run a larger disk test:
+No-install mode:
 
 ```bash
-python3 bin/clawbench.py --disk-size-mb 1024
+curl -fsSL https://raw.githubusercontent.com/getaskclaw/clawbench/main/bin/clawbench.sh | bash -s -- -n
 ```
 
-Skip network calls for offline/private environments:
+Explicit comparison run:
 
 ```bash
-python3 bin/clawbench.py --no-network
+curl -fsSL https://raw.githubusercontent.com/getaskclaw/clawbench/main/bin/clawbench.sh | bash -s -- -d 60 -z 8G -t 3
 ```
 
 ## What it measures
 
-ClawBench uses Python 3 standard library only.
-
 | Section | Method |
 | --- | --- |
-| System inventory | OS, kernel, CPU model/count, memory, disk filesystem, virtualization hints |
-| CPU | SHA-256 hashing throughput over repeated in-memory blocks |
-| Memory | bytearray copy throughput |
-| Disk write/read | sequential write + fsync and sequential read of a temporary file |
-| Network identity | public IP lookup and optional HTTP latency to a few endpoints |
+| System inventory | host, kernel, CPU model, vCPU count, RAM, free disk |
+| CPU | `sysbench cpu`, single-thread and all selected threads |
+| Memory | `sysbench memory`, read/write throughput |
+| Disk sequential | `fio` sequential write/read |
+| Disk random QD1 | `fio` 4K random read/write at queue depth 1, closer to VPS “feel” |
+| Disk pressure | `fio` 4K random read/write/mixed with capped jobs and queue depth 32 |
+| Durable write | `fio` 4K random write with `fsync=1`, including sync p95 when fio reports it |
 
-The benchmark intentionally avoids destructive tests, root-only actions, package installs, and long-running stress loops.
+ClawBench intentionally does **not** run Geekbench, Cloudflare speed tests, iperf, OpenSSL speed, or stress-ng. Keep the core signal clean.
 
-## Example
+## Auto defaults
+
+The default command should be enough for most users.
+
+- Test duration: `30s` per timed test.
+- Threads: detected with `nproc`.
+- Disk file size: about **1/10 free disk**, rounded down to a common fio size, with a floor of `512M` and cap of `8G`.
+- Missing tools: attempts to install `sysbench`, `fio`, and `python3` when possible.
+- Disk safety: requires the fio test size plus 20% free-space buffer.
+
+## Options
 
 ```text
-# ClawBench Report
-
-- Host: example-vps
-- Time UTC: 2026-04-29T00:00:00Z
-- OS: Debian GNU/Linux 12 (bookworm)
-- Kernel: Linux 6.1.0 x86_64
-
-## Summary
-
-| Metric | Value |
-| --- | ---: |
-| CPU SHA-256 | 1450.2 MB/s |
-| Memory copy | 8200.5 MB/s |
-| Disk write | 510.4 MB/s |
-| Disk read | 930.1 MB/s |
+-d SECONDS   seconds per timed test
+-z SIZE      fio test file size, e.g. 2G, 4G, 8G
+-t THREADS   CPU/memory benchmark threads
+-n           no install; skip missing tools
+-h           help
 ```
 
-## CLI options
+Environment overrides also work:
+
+```bash
+D=60 SIZE=8G T=3 INSTALL=0 bash clawbench.sh
+```
+
+Advanced fio overrides:
+
+```bash
+DIRECT=0 FIO_ENGINE=psync bash clawbench.sh
+```
+
+## Output
+
+ClawBench prints a table directly and writes full logs plus a TSV summary under `/tmp/clawbench-*`.
+
+Example header:
 
 ```text
---output PATH        Write Markdown report to PATH
---json PATH          Write raw JSON results to PATH
---disk-path PATH     Directory to use for disk benchmark (default: current directory)
---disk-size-mb N     Temporary disk test size, default 256
---cpu-seconds N      Approximate CPU benchmark duration, default 2.0
---mem-size-mb N      Memory buffer size, default 128
---no-network         Disable public-IP and HTTP latency checks
---endpoint URL       Add an HTTP endpoint for latency checks; can be repeated
+# Clawbench v0.6.0
+vCPU     : 3
+Threads  : 3
+Fio size : 4G
+Mode     : install=1, direct=1, fio_engine=libaio, pressure_jobs=3, pressure_depth=32
+Logs     : /tmp/clawbench-...
 ```
 
 ## Interpreting results
 
-ClawBench is best used for relative comparisons on the same day with the same flags. VPS performance is noisy: neighbors, throttling, storage cache, region, kernel, and CPU generation all matter. Run it multiple times before making a purchasing or migration decision.
+Use ClawBench for relative comparisons with the same command and similar time of day. VPS performance is noisy: neighbors, throttling, CPU generation, storage cache, kernel, and region all matter.
 
-Suggested comparison workflow:
+Most useful lines for ordinary VPS workloads:
 
-```bash
-python3 bin/clawbench.py --json "$(hostname)-$(date -u +%Y%m%dT%H%M%SZ).json" --output report.md
-```
+- `CPU single thread`
+- `CPU all threads`
+- `Disk random read/write 4K QD1`
+- `Disk random mixed 4K 60r/40w`
+- `Disk durable write 4K fsync`
 
-Then compare JSON files with your preferred tool.
+## Python legacy script
 
-## Differences from YABS
-
-YABS is excellent for widely recognized VPS community comparisons. ClawBench takes a different position:
-
-- Python standard library only instead of downloading helper binaries.
-- JSON-first output for automation and AI agents.
-- Conservative, explainable tests rather than broad benchmark suites.
-- No automatic Geekbench, fio, or iperf dependency.
-
-Use YABS when you need community-comparable scores. Use ClawBench when you need a quick, transparent, automation-friendly VPS check.
+`bin/clawbench.py` is kept as a Python stdlib-only lightweight inventory/check script. The primary one-line benchmark is now `bin/clawbench.sh`.
 
 ## Safety
 
-- Creates one temporary file in `--disk-path`, then removes it.
-- Does not require root.
-- Does not install packages.
-- Network checks are limited to HTTP GET requests unless `--no-network` is used.
+- Creates one temporary fio file in `.clawbench`, then removes it.
+- With default install mode, may install `sysbench`, `fio`, `python3`, and small distro support packages such as `ca-certificates`/`procps`; yum systems may also install `epel-release`.
+- Use `-n` to skip package installation entirely.
+- Does not run network speed tests.
+- Does not upload results.
 
 ## License
 
