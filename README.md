@@ -2,7 +2,7 @@
 
 ABS is a practical VPS decision benchmark: **one line in, keep/maybe/avoid out**.
 
-It is not trying to clone YABS. YABS is a long general benchmark. ABS is designed to finish fast, stay local-first, and explain whether a VPS is useful for ordinary workloads.
+ABS is designed to finish fast, stay local-first by default, and explain whether a VPS is useful for ordinary workloads.
 
 ## Quick start
 
@@ -49,7 +49,7 @@ Default ABS intentionally runs shorter than YABS. It favors useful signal over e
 | Section | Method |
 | --- | --- |
 | System inventory | host, uptime, distro, kernel, CPU, vCPU, RAM, swap, disk, VM type, AES-NI, VM-x/SVM |
-| Network identity | IPv4/IPv6 status and optional external IP/ASN lookup |
+| Network identity | optional `--net-info` IPv4/IPv6 status and external IP/ASN lookup |
 | CPU | `sysbench cpu`, single-thread and all selected threads |
 | Memory | `sysbench memory`, read/write throughput |
 | Disk sequential | `fio` sequential write/read |
@@ -89,7 +89,8 @@ That avoids misleading screenshots when fio or sysbench is missing.
 -z, --size SIZE      fio test file size, e.g. 512M, 2G, 8G
 -t, --threads N      CPU/memory benchmark threads
 -n, --no-install     do not install missing packages
---no-net-info        skip external IP/ASN lookup
+--net-info           check IPv4/IPv6 and external IP/ASN
+--no-net-info        skip external IP/ASN lookup (default)
 --network            run optional Cloudflare HTTP network sanity test
 --json               print JSON result at the end
 --json-file PATH     write JSON result to PATH as well as logdir
@@ -116,9 +117,10 @@ Use `--json-file result.json` to copy JSON somewhere specific.
 ## Privacy and mutation
 
 - No automatic result upload.
-- Default mode may install `sysbench`, `fio`, `python3`, and small distro support packages if missing. `curl` is installed only when `--network` needs it.
+- Default mode may install `sysbench`, `fio`, `python3`, and small distro support packages if missing. `curl` is installed only when `--net-info` or `--network` needs it.
 - Use `-n` / `--no-install` to skip package installation entirely.
-- Network identity lookup calls external endpoints unless `--no-net-info` is set.
+- Default mode does not call network endpoints for identity or speed tests.
+- `--net-info` calls external endpoints for IPv4/IPv6 and IP/ASN lookup.
 - `--network` calls Cloudflare speed endpoints for a short HTTP sanity check.
 - Disk tests create temporary files in `.abs`, then remove them.
 

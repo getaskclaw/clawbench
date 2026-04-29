@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 export LC_ALL=C
 
-VERSION="0.3.0"
+VERSION="0.4.0"
 TIME_START_EPOCH="$(date +%s)"
 TIME_START_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 VCPU="$(nproc 2>/dev/null || echo 1)"
@@ -18,7 +18,7 @@ FIO_ENGINE="${FIO_ENGINE:-libaio}"
 JOBS_ENV="${JOBS-}"
 DEPTH="${DEPTH:-32}"
 INSTALL="${INSTALL:-1}"
-NET_INFO="${NET_INFO:-1}"
+NET_INFO="${NET_INFO:-0}"
 NETWORK="${NETWORK:-0}"
 JSON_PRINT="${JSON_PRINT:-0}"
 JSON_FILE="${JSON_FILE:-}"
@@ -44,7 +44,7 @@ One-line run:
   curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash
   wget -qO- https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash
 
-Default profile targets under 3 minutes. ABS is local-first: no upload.
+Default profile targets under 3 minutes. ABS is local-first: network checks are opt-in, no result upload.
 
 Options:
   --quick              ~60s smoke profile
@@ -53,7 +53,8 @@ Options:
   -z, --size SIZE      fio test file size, e.g. 512M, 2G, 8G; default auto
   -t, --threads N      CPU/memory threads; default detected vCPU ($T)
   -n, --no-install     do not install missing packages
-  --no-net-info        skip external IP/ASN lookup
+  --net-info           check IPv4/IPv6 and external IP/ASN
+  --no-net-info        skip external IP/ASN lookup (default)
   --network            run optional Cloudflare HTTP network sanity test
   --json               print JSON result at the end
   --json-file PATH     write JSON result to PATH as well as logdir
@@ -87,6 +88,7 @@ while [ "$#" -gt 0 ]; do
       shift; [ "$#" -gt 0 ] || { echo "Missing value for -t/--threads" >&2; exit 2; }
       T="$1" ;;
     -n|--no-install) INSTALL=0 ;;
+    --net-info) NET_INFO=1 ;;
     --no-net-info) NET_INFO=0 ;;
     --network) NETWORK=1 ;;
     --json) JSON_PRINT=1 ;;
@@ -205,7 +207,7 @@ missing_tools() {
   have sysbench || missing+=(sysbench)
   have_fio || missing+=(fio)
   have python3 || missing+=(python3)
-  if [ "$NETWORK" = "1" ]; then
+  if [ "$NETWORK" = "1" ] || [ "$NET_INFO" = "1" ]; then
     have curl || missing+=(curl)
   fi
   printf '%s\n' "${missing[@]}"
@@ -225,19 +227,24 @@ install_tools() {
   echo "Missing tools: $missing"
   echo "Installing missing tools when possible... use -n/--no-install to skip installation."
 
+  local curl_pkg=""
+  if [ "$NETWORK" = "1" ] || [ "$NET_INFO" = "1" ]; then
+    curl_pkg="curl"
+  fi
+
   if have apt-get; then
     sudo_cmd env DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null 2>"$LOGDIR/install-apt-update.err" || true
-    sudo_cmd env DEBIAN_FRONTEND=noninteractive apt-get install -y sysbench fio python3 curl ca-certificates procps \
+    sudo_cmd env DEBIAN_FRONTEND=noninteractive apt-get install -y sysbench fio python3 ca-certificates procps $curl_pkg \
       >"$LOGDIR/install-apt.log" 2>"$LOGDIR/install-apt.err" || true
   elif have dnf; then
-    sudo_cmd dnf install -y sysbench fio python3 curl procps-ng >"$LOGDIR/install-dnf.log" 2>"$LOGDIR/install-dnf.err" || true
+    sudo_cmd dnf install -y sysbench fio python3 procps-ng $curl_pkg >"$LOGDIR/install-dnf.log" 2>"$LOGDIR/install-dnf.err" || true
   elif have yum; then
     sudo_cmd yum install -y epel-release >"$LOGDIR/install-yum-epel.log" 2>"$LOGDIR/install-yum-epel.err" || true
-    sudo_cmd yum install -y sysbench fio python3 curl procps-ng >"$LOGDIR/install-yum.log" 2>"$LOGDIR/install-yum.err" || true
+    sudo_cmd yum install -y sysbench fio python3 procps-ng $curl_pkg >"$LOGDIR/install-yum.log" 2>"$LOGDIR/install-yum.err" || true
   elif have pacman; then
-    sudo_cmd pacman -Sy --noconfirm sysbench fio python curl procps >"$LOGDIR/install-pacman.log" 2>"$LOGDIR/install-pacman.err" || true
+    sudo_cmd pacman -Sy --noconfirm sysbench fio python procps $curl_pkg >"$LOGDIR/install-pacman.log" 2>"$LOGDIR/install-pacman.err" || true
   elif have apk; then
-    sudo_cmd apk add --no-cache sysbench fio python3 curl procps >"$LOGDIR/install-apk.log" 2>"$LOGDIR/install-apk.err" || true
+    sudo_cmd apk add --no-cache sysbench fio python3 procps $curl_pkg >"$LOGDIR/install-apk.log" 2>"$LOGDIR/install-apk.err" || true
   fi
 
   have_fio || true
@@ -568,7 +575,6 @@ PY
 
 network_sanity() {
   if [ "$NETWORK" != "1" ]; then
-    add "Network sanity" "skipped; use --network to run HTTP checks"
     return 0
   fi
   if ! have curl; then
@@ -636,6 +642,7 @@ json_report() {
   ABS_DISK_TOTAL_KB="$DISK_TOTAL_KB" ABS_DISK_FREE_KB="$DISK_FREE_KB" ABS_VM_TYPE="$VM_TYPE" \
   ABS_IPV4="$IPV4_STATUS" ABS_IPV6="$IPV6_STATUS" ABS_IP_INFO="$IP_INFO" \
   ABS_THREADS="$T" ABS_DURATION="$D" ABS_SIZE="$SIZE" ABS_INSTALL="$INSTALL" ABS_INSTALL_ATTEMPTED="$INSTALL_ATTEMPTED" \
+  ABS_NET_INFO="$NET_INFO" ABS_NETWORK="$NETWORK" \
   ABS_MISSING_TOOLS="$MISSING_AFTER_INSTALL" ABS_DIRECT="$DIRECT" ABS_FIO_ENGINE="$FIO_ENGINE" \
   ABS_JOBS="$JOBS" ABS_DEPTH="$DEPTH" ABS_SCORE="$SCORE_TEXT" ABS_VERDICT="$VERDICT_TEXT" \
   python3 - "$RESULTS" <<'PY'
@@ -692,6 +699,7 @@ out = {
     'mode': {
         'threads': env_int('ABS_THREADS'), 'duration_seconds': env_int('ABS_DURATION'), 'fio_size': env('ABS_SIZE'),
         'install': env('ABS_INSTALL') == '1', 'install_attempted': env('ABS_INSTALL_ATTEMPTED') == '1',
+        'net_info': env('ABS_NET_INFO') == '1', 'network': env('ABS_NETWORK') == '1',
         'missing_tools': env('ABS_MISSING_TOOLS'), 'direct': env('ABS_DIRECT'), 'fio_engine': env('ABS_FIO_ENGINE'),
         'pressure_jobs': env_int('ABS_JOBS'), 'pressure_depth': env_int('ABS_DEPTH'),
     },
@@ -778,7 +786,7 @@ VM Type  : $VM_TYPE
 IPv4/IPv6: $IPV4_STATUS / $IPV6_STATUS
 IP info  : $IP_INFO
 Fio size : $SIZE
-Mode     : install=$INSTALL, direct=$DIRECT, fio_engine=$FIO_ENGINE, pressure_jobs=$JOBS, pressure_depth=$DEPTH, network=$NETWORK
+Mode     : install=$INSTALL, direct=$DIRECT, fio_engine=$FIO_ENGINE, pressure_jobs=$JOBS, pressure_depth=$DEPTH, net_info=$NET_INFO, network=$NETWORK
 Duration : ${D}s/timed test
 Tools    : sysbench=$(sysbench --version 2>/dev/null | awk '{print $2}' || echo no), fio=$([ -n "$FIO_BIN" ] && "$FIO_BIN" --version 2>/dev/null || echo no), python3=$(python3 --version 2>/dev/null | awk '{print $2}' || echo no), curl=$(curl --version 2>/dev/null | awk 'NR==1{print $2}' || echo no)
 Logs     : $LOGDIR
@@ -905,7 +913,7 @@ else
   add "ABS verdict" "$VERDICT_TEXT"
 fi
 add_note "Score note" "FULL scores require CPU, memory, disk QD1, and fsync. PARTIAL is not comparable."
-add_note "Privacy note" "No result upload. --network downloads 25 MB and uploads 10 MB of zero data to Cloudflare; --no-net-info skips IP/ASN lookup."
+add_note "Privacy note" "No result upload. Identity/speed checks are off by default; package install may contact distro mirrors unless -n is used. --net-info calls IP/ASN endpoints; --network uses Cloudflare."
 
 ELAPSED_SECONDS=$(( $(date +%s) - TIME_START_EPOCH ))
 if have python3; then
