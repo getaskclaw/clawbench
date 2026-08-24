@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 export LC_ALL=C
 
-VERSION="0.4.8"
+VERSION="0.4.9"
 TIME_START_EPOCH="$(date +%s)"
 TIME_START_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 VCPU="$(nproc 2>/dev/null || echo 1)"
@@ -27,11 +27,13 @@ IPERF_PARALLEL="${IPERF_PARALLEL:-2}"
 VERBOSE="${VERBOSE:-0}"
 JSON_PRINT="${JSON_PRINT:-0}"
 JSON_FILE="${JSON_FILE:-}"
-LOGDIR="${LOGDIR:-/tmp/abs-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+LOGDIR_OVERRIDE="${LOGDIR-}"
+LOGDIR=""
 
-RESULTS="$LOGDIR/results.tsv"
-JSON_RESULT="$LOGDIR/result.json"
-FIO_FILE="$DIR/abs.test"
+RESULTS=""
+JSON_RESULT=""
+RUN_DIR=""
+FIO_FILE=""
 FIO_BIN=""
 JOBS=""
 LAST_LOG=""
@@ -42,6 +44,7 @@ NETWORK_SCORE_TEXT="skipped"
 VERDICT_TEXT="n/a"
 INSTALL_ATTEMPTED="0"
 MISSING_AFTER_INSTALL=""
+FINAL_STATUS=0
 
 usage() {
   cat <<EOF
@@ -66,7 +69,7 @@ Options:
   --network-full       Cloudflare + 3 public iperf3 regions
   --network-yabs       Cloudflare + full YABS public iperf3 list
   --no-network         skip network speed sanity test
-  --iperf HOST[:PORT]  optional iperf3 send/recv against your own server
+  --iperf HOST[:PORT]  optional iperf3 send/recv; use [IPv6]:PORT for IPv6
   --verbose            print full system/tool header
   --json               print JSON result at the end
   --json-file PATH     write JSON result to PATH as well as logdir
@@ -138,15 +141,56 @@ case "$PROFILE" in
 esac
 
 is_pos_int() { [[ "${1:-}" =~ ^[1-9][0-9]*$ ]]; }
+valid_port_range() {
+  local range="${1:-}" low high
+  [[ "$range" =~ ^([0-9]{1,5})(-([0-9]{1,5}))?$ ]] || return 1
+  low=$(( 10#${BASH_REMATCH[1]} ))
+  high="$low"
+  [ -n "${BASH_REMATCH[3]:-}" ] && high=$(( 10#${BASH_REMATCH[3]} ))
+  [ "$low" -ge 1 ] && [ "$high" -le 65535 ] && [ "$low" -le "$high" ]
+}
+
+IPERF_CUSTOM_HOST=""
+IPERF_CUSTOM_PORT=""
+parse_custom_iperf() {
+  local endpoint="$1" host port rest
+  if [[ "$endpoint" =~ ^\[([^][]+)\](:([0-9]{1,5}))?$ ]]; then
+    host="${BASH_REMATCH[1]}"
+    port="${BASH_REMATCH[3]:-5201}"
+  elif [[ "$endpoint" == *:* ]]; then
+    host="${endpoint%%:*}"
+    rest="${endpoint#*:}"
+    if [[ "$rest" == *:* ]]; then
+      # Raw IPv6 literal without brackets; use the default port.
+      host="$endpoint"
+      port=5201
+    else
+      port="$rest"
+    fi
+  else
+    host="$endpoint"
+    port=5201
+  fi
+  [ -n "$host" ] && [[ "$host" != -* ]] && [[ ! "$host" =~ [[:space:]] ]] || return 1
+  valid_port_range "$port" || return 1
+  IPERF_CUSTOM_HOST="$host"
+  IPERF_CUSTOM_PORT="$port"
+}
+
 if ! is_pos_int "$D"; then echo "Invalid duration: $D" >&2; exit 2; fi
 if ! is_pos_int "$T"; then echo "Invalid threads: $T" >&2; exit 2; fi
 if ! is_pos_int "$DEPTH"; then echo "Invalid DEPTH: $DEPTH" >&2; exit 2; fi
 if ! is_pos_int "$IPERF_TIME"; then echo "Invalid IPERF_TIME: $IPERF_TIME" >&2; exit 2; fi
 if ! is_pos_int "$IPERF_PARALLEL"; then echo "Invalid IPERF_PARALLEL: $IPERF_PARALLEL" >&2; exit 2; fi
+if [ "$DIRECT" != "0" ] && [ "$DIRECT" != "1" ]; then echo "Invalid DIRECT: $DIRECT" >&2; exit 2; fi
 if [ "$NET_INFO" != "0" ] && [ "$NET_INFO" != "1" ]; then echo "Invalid NET_INFO: $NET_INFO" >&2; exit 2; fi
 if [ "$NETWORK" != "0" ] && [ "$NETWORK" != "1" ]; then echo "Invalid NETWORK: $NETWORK" >&2; exit 2; fi
 case "$NETWORK_PROFILE" in cloudflare|full|yabs|none) ;; *) echo "Invalid NETWORK_PROFILE: $NETWORK_PROFILE" >&2; exit 2 ;; esac
 if [ "$VERBOSE" != "0" ] && [ "$VERBOSE" != "1" ]; then echo "Invalid VERBOSE: $VERBOSE" >&2; exit 2; fi
+if [ -n "$IPERF_SERVER" ] && ! parse_custom_iperf "$IPERF_SERVER"; then
+  echo "Invalid --iperf endpoint: $IPERF_SERVER (expected HOST[:PORT], [IPv6]:PORT, or IPv6)" >&2
+  exit 2
+fi
 
 if [ -n "$JOBS_ENV" ]; then
   JOBS="$JOBS_ENV"
@@ -155,7 +199,15 @@ else
 fi
 if ! is_pos_int "$JOBS"; then echo "Invalid JOBS: $JOBS" >&2; exit 2; fi
 
-mkdir -p "$LOGDIR" "$DIR"
+mkdir -p -- "$DIR"
+if [ -n "$LOGDIR_OVERRIDE" ]; then
+  LOGDIR="$LOGDIR_OVERRIDE"
+  mkdir -p -- "$LOGDIR"
+else
+  LOGDIR="$(mktemp -d "${TMPDIR:-/tmp}/abs.XXXXXXXX")"
+fi
+RESULTS="$LOGDIR/results.tsv"
+JSON_RESULT="$LOGDIR/result.json"
 printf 'Metric\tResult\n' > "$RESULTS"
 
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -271,7 +323,9 @@ install_tools() {
     sudo_cmd yum install -y epel-release >"$LOGDIR/install-yum-epel.log" 2>"$LOGDIR/install-yum-epel.err" || true
     sudo_cmd yum install -y sysbench fio python3 procps-ng $curl_pkg $iperf_pkg >"$LOGDIR/install-yum.log" 2>"$LOGDIR/install-yum.err" || true
   elif have pacman; then
-    sudo_cmd pacman -Sy --noconfirm sysbench fio python procps $curl_pkg $iperf_pkg >"$LOGDIR/install-pacman.log" 2>"$LOGDIR/install-pacman.err" || true
+    # Do not use `pacman -Sy`: syncing package metadata without a full upgrade
+    # creates an unsupported partial-upgrade state on Arch Linux.
+    sudo_cmd pacman -S --needed --noconfirm sysbench fio python procps $curl_pkg $iperf_pkg >"$LOGDIR/install-pacman.log" 2>"$LOGDIR/install-pacman.err" || true
   elif have apk; then
     sudo_cmd apk add --no-cache sysbench fio python3 procps $curl_pkg $iperf_pkg >"$LOGDIR/install-apk.log" 2>"$LOGDIR/install-apk.err" || true
   fi
@@ -313,12 +367,24 @@ fio_run() {
   LAST_JSON="$LOGDIR/$name.json"
   local err="$LOGDIR/$name.err"
   local fio_rw="$rw"
+  local test_size="$SIZE" segment_bytes=""
   [ "$rw" = "prepare" ] && fio_rw="write"
+
+  if [ "$jobs" -gt 1 ]; then
+    local total_bytes
+    total_bytes="$(size_bytes "$SIZE")"
+    segment_bytes=$(( total_bytes / jobs / 4096 * 4096 ))
+    if [ "$segment_bytes" -lt 4096 ]; then
+      printf 'SIZE=%s is too small for %s fio jobs\n' "$SIZE" "$jobs" >"$err"
+      return 1
+    fi
+    test_size="$segment_bytes"
+  fi
 
   local args=(
     --name="$name"
     --filename="$FIO_FILE"
-    --size="$SIZE"
+    --size="$test_size"
     --rw="$fio_rw"
     --bs="$bs"
     --numjobs="$jobs"
@@ -329,6 +395,11 @@ fio_run() {
     --ioengine="$FIO_ENGINE"
     --output-format=json
   )
+
+  # With an explicit filename, fio clones otherwise hit the same byte range.
+  # Split the prepared file into disjoint regions so overlapping writes cannot
+  # be coalesced and falsely inflate pressure-test throughput.
+  [ -n "$segment_bytes" ] && args+=(--offset_increment="$segment_bytes")
 
   if [ "$rw" != "prepare" ]; then
     args+=(--runtime="$D" --time_based)
@@ -432,10 +503,11 @@ PY
 }
 
 abs_local_score() {
-  python3 - "$RESULTS" "$T" <<'PY'
+  python3 - "$RESULTS" "$T" "$DIRECT" <<'PY'
 import csv, math, re, sys
 path = sys.argv[1]
 threads = float(sys.argv[2]) if len(sys.argv) > 2 else 1.0
+direct_io = len(sys.argv) > 3 and sys.argv[3] == '1'
 rows = {}
 try:
     with open(path, newline='', encoding='utf-8', errors='replace') as f:
@@ -483,20 +555,23 @@ if mem_read and mem_write:
 else:
     missing.append('mem')
 
-qd1_read = first_num(metric('Disk random read 4K QD1'))
-qd1_write = first_num(metric('Disk random write 4K QD1'))
-if qd1_read and qd1_write:
-    disk = 1000 * math.sqrt((qd1_read / 10000.0) * (qd1_write / 5000.0))
-    components.append(('disk', clamp(disk), 0.30))
-else:
-    missing.append('disk')
+if direct_io:
+    qd1_read = first_num(metric('Disk random read 4K QD1'))
+    qd1_write = first_num(metric('Disk random write 4K QD1'))
+    if qd1_read and qd1_write:
+        disk = 1000 * math.sqrt((qd1_read / 10000.0) * (qd1_write / 5000.0))
+        components.append(('disk', clamp(disk), 0.30))
+    else:
+        missing.append('disk')
 
-fsync = first_num(metric('Disk durable write 4K fsync'))
-if fsync:
-    dur = 1000 * math.sqrt(fsync / 2000.0)
-    components.append(('fsync', clamp(dur), 0.15))
+    fsync = first_num(metric('Disk durable write 4K fsync'))
+    if fsync:
+        dur = 1000 * math.sqrt(fsync / 2000.0)
+        components.append(('fsync', clamp(dur), 0.15))
+    else:
+        missing.append('fsync')
 else:
-    missing.append('fsync')
+    missing.extend(('disk-buffered', 'fsync-buffered'))
 
 if not components:
     print('n/a')
@@ -601,6 +676,9 @@ abs_score() {
   python3 - "$LOCAL_SCORE_TEXT" "$NETWORK_SCORE_TEXT" <<'PY'
 import re, sys
 local_text, net_text = sys.argv[1], sys.argv[2]
+if (local_text or '').startswith('PARTIAL'):
+    print(local_text)
+    raise SystemExit
 ml = re.search(r'FULL\s+(\d+)', local_text or '')
 if not ml:
     print('PARTIAL - not comparable: missing local core')
@@ -620,9 +698,10 @@ PY
 }
 
 abs_verdict() {
-  python3 - "$SCORE_TEXT" "$RESULTS" "$VM_TYPE" <<'PY'
-import csv, re, sys
+  python3 - "$SCORE_TEXT" "$RESULTS" "$VM_TYPE" "$T" <<'PY'
+import csv, math, re, sys
 score_text, results, vm_type = sys.argv[1], sys.argv[2], (sys.argv[3] or '').lower()
+threads = float(sys.argv[4]) if len(sys.argv) > 4 else 1.0
 if score_text.startswith('PARTIAL') or score_text == 'n/a':
     print('INCOMPLETE - missing required benchmark sections')
     raise SystemExit
@@ -646,10 +725,40 @@ fsync = num('Disk durable write 4K fsync')
 qd1_write = num('Disk random write 4K QD1')
 if score >= 1200:
     verdict = 'KEEP'
+    reason = 'practical VPS profile looks acceptable'
 elif score >= 800:
     verdict = 'MAYBE'
+    reason = 'usable, but has notable weaknesses'
 else:
     verdict = 'AVOID'
+    reason = 'weak practical VPS performance'
+
+# A weighted average must not let one capped high component hide a
+# catastrophic bottleneck. These use the same normalized component formulas
+# as abs_local_score. FULL still means all tests completed, not that they were
+# all good.
+single = num('CPU single thread')
+all_cpu = num('CPU all threads')
+mem_read = num('Memory read')
+mem_write = num('Memory write')
+qd1_read = num('Disk random read 4K QD1')
+component_scores = {}
+if all(v is not None and v > 0 for v in (single, all_cpu, mem_read, mem_write, qd1_read, qd1_write, fsync)) and threads > 0:
+    component_scores = {
+        'CPU': min(3000, 1000 * math.sqrt((single / 400.0) * ((all_cpu / threads) / 400.0))),
+        'memory': min(3000, 1000 * math.sqrt((mem_read / 30000.0) * (mem_write / 20000.0))),
+        'disk': min(3000, 1000 * math.sqrt((qd1_read / 10000.0) * (qd1_write / 5000.0))),
+        'fsync': min(3000, 1000 * math.sqrt(fsync / 2000.0)),
+    }
+if component_scores:
+    floor_name, floor_score = min(component_scores.items(), key=lambda item: item[1])
+    if floor_score < 250:
+        verdict = 'AVOID'
+        reason = f'critical {floor_name} bottleneck (component score {round(floor_score)})'
+    elif floor_score < 500:
+        if verdict == 'KEEP':
+            verdict = 'MAYBE'
+        reason = f'{floor_name} component is weak (component score {round(floor_score)})'
 why = []
 if fsync is not None and fsync < 500:
     why.append('weak durable-write/fsync')
@@ -658,9 +767,8 @@ if 'openvz' in vm_type:
 if (qd1_write is not None and qd1_write > 100000) or (fsync is not None and fsync > 8000):
     why.append('very high write/fsync numbers; verify with --full before buying')
 if why:
-    print(f'{verdict} - {"; ".join(why)}')
-else:
-    print(f'{verdict} - practical VPS profile looks acceptable')
+    reason += '; ' + '; '.join(why)
+print(f'{verdict} - {reason}')
 PY
 }
 
@@ -745,13 +853,14 @@ network_sanity() {
 
 pick_port() {
   local range="$1" low high
-  if [[ "$range" == *-* ]]; then
-    low="${range%-*}"
-    high="${range#*-}"
-    printf '%s\n' $(( low + RANDOM % (high - low + 1) ))
-  else
-    printf '%s\n' "$range"
+  if ! valid_port_range "$range"; then
+    echo "Invalid iperf3 port or range: $range" >&2
+    return 2
   fi
+  low=$(( 10#${range%%-*} ))
+  high="$low"
+  [[ "$range" == *-* ]] && high=$(( 10#${range#*-} ))
+  printf '%s\n' $(( low + RANDOM % (high - low + 1) ))
 }
 
 run_iperf_cmd() {
@@ -825,13 +934,8 @@ iperf_sanity() {
 
   if [ -n "$IPERF_SERVER" ]; then
     local host port label
-    if [[ "$IPERF_SERVER" == *:* && "$IPERF_SERVER" != \[* ]]; then
-      host="${IPERF_SERVER%:*}"
-      port="${IPERF_SERVER##*:}"
-    else
-      host="$IPERF_SERVER"
-      port=5201
-    fi
+    host="$IPERF_CUSTOM_HOST"
+    port="$IPERF_CUSTOM_PORT"
     label="custom $host:$port"
     iperf_pair "$host" "$port" "$label"
   fi
@@ -856,7 +960,7 @@ dd_fallback() {
     add "Disk fallback dd" "dd not installed; skipped"
     return 0
   fi
-  local dd_file="$DIR/abs-dd.test"
+  local dd_file="$RUN_DIR/abs-dd.test"
   local write_log="$LOGDIR/dd-write.log"
   local read_log="$LOGDIR/dd-read.log"
   rm -f "$dd_file" 2>/dev/null || true
@@ -880,7 +984,6 @@ dd_fallback() {
 }
 
 json_report() {
-  [ -n "$JSON_FILE" ] && mkdir -p "$(dirname "$JSON_FILE")" 2>/dev/null || true
   ABS_JSON_TARGET="$JSON_RESULT" \
   ABS_JSON_COPY="$JSON_FILE" \
   ABS_VERSION="$VERSION" ABS_PROFILE="$PROFILE" ABS_TARGET="$PROFILE_TARGET" \
@@ -977,17 +1080,28 @@ with open(target, 'w', encoding='utf-8') as f:
 copy = env('ABS_JSON_COPY')
 if copy:
     try:
-        shutil.copyfile(target, copy)
+        os.makedirs(os.path.dirname(os.path.abspath(copy)), exist_ok=True)
+        if os.path.realpath(copy) != os.path.realpath(target):
+            shutil.copyfile(target, copy)
     except Exception as e:
-        print(f'warning: could not copy JSON to {copy}: {e}', file=sys.stderr)
+        print(f'error: could not copy JSON to {copy}: {e}', file=sys.stderr)
+        raise SystemExit(1)
 print(target)
 PY
 }
 
 cleanup() {
-  rm -f "$FIO_FILE" "$FIO_FILE".* "$DIR/abs-dd.test" 2>/dev/null || true
+  [ -n "$RUN_DIR" ] || return 0
+  rm -f -- "$FIO_FILE" "$FIO_FILE".* "$RUN_DIR/abs-dd.test" 2>/dev/null || true
+  rmdir -- "$RUN_DIR" 2>/dev/null || true
+}
+reset_test_files() {
+  [ -n "$RUN_DIR" ] || return 0
+  rm -f -- "$FIO_FILE" "$FIO_FILE".* "$RUN_DIR/abs-dd.test" 2>/dev/null || true
 }
 trap cleanup EXIT
+RUN_DIR="$(mktemp -d "$DIR/.abs-run.XXXXXXXX")"
+FIO_FILE="$RUN_DIR/abs.test"
 
 if [ "$NET_INFO" = "1" ]; then
   echo "Network info lookup enabled: checks IPv4/IPv6 and external IP/ASN. Use --no-net-info to skip."
@@ -1113,7 +1227,8 @@ fi
 
 if [ -n "$FIO_BIN" ] && have python3; then
   need_bytes="$(size_bytes "$SIZE" 2>/dev/null || echo -1)"
-  avail_bytes="$(df -PB1 "$DIR" 2>/dev/null | awk 'NR==2 {print $4+0}')"
+  avail_kib="$(df -Pk "$DIR" 2>/dev/null | awk 'NR==2 {print $4+0}' || echo 0)"
+  avail_bytes=$(( ${avail_kib:-0} * 1024 ))
   required_bytes=$(( need_bytes + need_bytes / 5 ))
 
   if [ "${need_bytes:-0}" -le 0 ]; then
@@ -1121,7 +1236,7 @@ if [ -n "$FIO_BIN" ] && have python3; then
   elif [ "${avail_bytes:-0}" -le "$required_bytes" ]; then
     add "fio disk tests" "not enough free space for SIZE=$SIZE plus 20% buffer; skipped"
   else
-    cleanup
+    reset_test_files
 
     if ! fio_run fio-prepare prepare 1M 1 1; then
       add "fio prepare" "FAILED; see $LOGDIR/fio-prepare.err"
@@ -1208,9 +1323,14 @@ add_note "Privacy note" "No result upload. Default network sanity uses Cloudflar
 
 ELAPSED_SECONDS=$(( $(date +%s) - TIME_START_EPOCH ))
 if have python3; then
-  JSON_WRITTEN="$(json_report)"
-  add_note "JSON result" "$JSON_WRITTEN"
-  [ -n "$JSON_FILE" ] && add_note "JSON copy" "$JSON_FILE"
+  if JSON_WRITTEN="$(json_report)"; then
+    add_note "JSON result" "$JSON_WRITTEN"
+    [ -n "$JSON_FILE" ] && add_note "JSON copy" "$JSON_FILE"
+  else
+    FINAL_STATUS=1
+    add_note "JSON result" "$JSON_RESULT"
+    [ -n "$JSON_FILE" ] && add_note "JSON copy" "FAILED: $JSON_FILE"
+  fi
   if [ "$JSON_PRINT" = "1" ]; then
     printf '\nJSON:\n'
     python3 -m json.tool "$JSON_RESULT" 2>/dev/null || true
@@ -1230,3 +1350,4 @@ trap - EXIT
 cleanup
 
 printf '\nCompleted in %dm %02ds. TSV summary: %s\n' $((ELAPSED_SECONDS / 60)) $((ELAPSED_SECONDS % 60)) "$RESULTS"
+exit "$FINAL_STATUS"

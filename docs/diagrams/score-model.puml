@@ -1,0 +1,31 @@
+@startuml
+!pragma layout smetana
+title ABS 综合分由什么组成？
+skinparam backgroundColor #FFF9F0
+skinparam shadowing false
+skinparam defaultFontName Noto Sans CJK SC
+skinparam rectangle {
+  BackgroundColor #FFE4B8
+  BorderColor #D97706
+  FontColor #5A2D0C
+}
+rectangle "本地性能（计分）" #FFF0D5 {
+  rectangle "CPU\n40%" as CPU
+  rectangle "内存\n15%" as MEM
+  rectangle "4K QD1 磁盘\n30%" as DISK
+  rectangle "fsync 持久写入\n15%" as FSYNC
+}
+rectangle "FULL 本地综合分" as SCORE #FFD08A
+rectangle "网络（仅参考）" #FFF8E7 {
+  rectangle "Cloudflare\n或 iperf3" as NET
+}
+CPU --> SCORE
+MEM --> SCORE
+DISK --> SCORE
+FSYNC --> SCORE
+NET ..> SCORE : 不计分
+note bottom of SCORE
+FULL 表示四项本地测试完整，
+不表示机器一定很快。
+end note
+@enduml

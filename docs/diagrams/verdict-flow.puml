@@ -1,0 +1,34 @@
+@startuml
+!pragma layout smetana
+title 如何读 ABS 的最终结论？
+skinparam backgroundColor #FFF9F0
+skinparam shadowing false
+skinparam defaultFontName Noto Sans CJK SC
+skinparam activity {
+  BackgroundColor #FFE4B8
+  BorderColor #D97706
+  DiamondBackgroundColor #FFF0D5
+  DiamondBorderColor #EA580C
+  FontColor #5A2D0C
+}
+start
+if (CPU / 内存 / 磁盘 / fsync\n有测试缺失？) then (是)
+  #E8E1D7:INCOMPLETE\n结果不完整;
+else (否)
+  :找到四个组件中的最低分;
+  if (最低分 < 250？) then (是)
+    #FFD2C2:AVOID\n存在灾难性短板;
+  elseif (最低分 < 500？) then (是)
+    #FFE8A3:MAYBE\n即使总分很高也不能 KEEP;
+  else (否)
+    if (综合分 >= 1200？) then (是)
+      #DDF5C4:KEEP;
+    elseif (综合分 >= 800？) then (是)
+      #FFE8A3:MAYBE;
+    else (否)
+      #FFD2C2:AVOID;
+    endif
+  endif
+endif
+stop
+@enduml

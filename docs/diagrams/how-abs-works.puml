@@ -1,0 +1,36 @@
+@startuml
+!pragma layout smetana
+title ABS 一次运行会做什么？
+skinparam backgroundColor #FFF9F0
+skinparam shadowing false
+skinparam defaultFontName Noto Sans CJK SC
+skinparam activity {
+  BackgroundColor #FFE4B8
+  BorderColor #D97706
+  DiamondBackgroundColor #FFF0D5
+  DiamondBorderColor #EA580C
+  FontColor #5A2D0C
+}
+start
+:运行 abs.sh;
+:检查 Linux、Bash 和测试工具;
+if (缺少工具？) then (是)
+  if (允许自动安装？) then (是)
+    :安装 sysbench / fio / python3 / curl;
+  else (否，使用 -n)
+    :跳过依赖缺失的测试;
+  endif
+endif
+:测试 CPU 和内存;
+:测试磁盘和 fsync;
+:计算本地综合分;
+if (启用网络检查？) then (是)
+  :运行 Cloudflare / iperf3 检查;
+  note right
+    网络只作参考，
+    不进入综合分。
+  end note
+endif
+:输出 SCORE 和 VERDICT;
+stop
+@enduml

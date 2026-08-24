@@ -1,0 +1,181 @@
+# ABS — AskClaw Benchmark Script
+
+[简体中文](README.md)
+
+ABS is a quick VPS benchmark that ends with a simple verdict:
+
+```text
+KEEP / MAYBE / AVOID / INCOMPLETE
+```
+
+It helps answer one question:
+
+> **Should I keep this VPS?**
+
+## Run it
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash
+```
+
+Default run:
+
+- requires Linux and Bash; on a minimal Alpine image, run `apk add bash` first
+- takes about **under 3 minutes** after dependencies are installed
+- may install missing tools: `sysbench`, `fio`, `python3`, `curl`
+- tests CPU, memory, disk, fsync, and a short Cloudflare network sanity check
+- uploads **nothing**
+
+## Read the result
+
+At the end, look for this block:
+
+```text
+==================== ABS RESULT ====================
+SCORE   : FULL 2771 (local only; network reference 2038)
+VERDICT : KEEP - practical VPS profile looks acceptable
+LOCAL   : FULL 2771 (local only: cpu,mem,disk,fsync; network excluded)
+NETWORK : SANITY 2038 (Cloudflare HTTP; reference only, not in score)
+====================================================
+```
+
+Meaning:
+
+- **KEEP** — looks good for practical VPS use
+- **MAYBE** — usable, but has weaknesses or depends on price/location
+- **AVOID** — weak result; probably not worth keeping
+- **INCOMPLETE** — an important local test (CPU, memory, disk, or fsync) failed or was skipped
+
+If the local score says `PARTIAL - not comparable`, do not compare it with full runs. Usually `fio`, `python3`, or another local benchmark dependency was missing. Network failures are reported separately and do not make an otherwise complete local result incomplete.
+
+## Bigger specs can be worse
+
+Do not trust VPS plan labels alone.
+
+A **6 vCPU / 16 GB RAM** VPS can be much worse than a **3 vCPU / 12 GB RAM** VPS because providers differ in CPU sharing, storage latency, noisy neighbors, and routing.
+
+Real ABS example:
+
+| 6 vCPU / 16 GB: MAYBE | 3 vCPU / 12 GB: KEEP |
+|---|---|
+| ![ABS result: 6 vCPU 16GB VPS scored MAYBE](assets/abs-six225-6vcpu-maybe.jpg) | ![ABS result: 3 vCPU 12GB VPS scored KEEP](assets/abs-to6427-3vcpu-keep.jpg) |
+
+## Common commands
+
+```bash
+# normal run
+curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash
+
+# quick smoke test
+curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash -s -- --quick
+
+# stronger local test
+curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash -s -- --full
+
+# no package installation
+curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash -s -- -n
+
+# skip network checks
+curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash -s -- --no-network
+
+# stronger network test: Cloudflare + 3 public iperf3 regions
+curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash -s -- --network-full
+
+# YABS-style network list
+curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash -s -- --network-yabs
+```
+
+## China / restricted DNS fallback
+
+If `raw.githubusercontent.com` or `cdn.jsdelivr.net` cannot resolve, try:
+
+```bash
+curl --resolve cdn.jsdelivr.net:443:104.16.175.226 \
+  -fsSL https://cdn.jsdelivr.net/gh/getaskclaw/abs@main/abs.sh | bash -s -- -n
+```
+
+This uses `-n` / `--no-install` to avoid hanging on broken or slow package mirrors.
+
+Warning: if `fio` or `python3` is missing, disk/fsync will be skipped and the score may be partial.
+
+## What ABS measures
+
+- **CPU** — sysbench single-thread and all-thread throughput
+- **Memory** — sysbench read/write throughput
+- **Disk** — fio sequential and 4K random tests
+- **Durable write** — fio 4K fsync test
+- **Network** — Cloudflare HTTP sanity check by default
+
+If `fio` is missing, ABS may run a small `dd` disk fallback. That fallback is only a rough sanity check and is **not scored**.
+
+## Score formula
+
+Headline score:
+
+```text
+40% CPU + 15% memory + 30% disk QD1 + 15% fsync
+```
+
+The headline score is local-only. ABS prints network results separately as a diagnostic reference; they never raise or lower the score or change a complete local verdict to `INCOMPLETE`.
+
+The CPU component combines single-thread speed with all-thread throughput normalized per configured thread. It measures per-vCPU quality and scaling under contention, not total compute capacity; compare total all-thread throughput separately when core count matters.
+
+The verdict also applies a component floor: a core component below 250 forces `AVOID`, while a component below 500 prevents `KEEP`. This stops an exceptionally strong CPU, for example, from hiding unusably weak memory or storage.
+
+Comparable disk and fsync scoring requires direct I/O (`DIRECT=1`, the default). A diagnostic run with `DIRECT=0` still prints buffered fio results, but ABS marks the score `PARTIAL - not comparable` because page cache can inflate those numbers dramatically.
+
+Network is useful but noisy. Cloudflare and public iperf3 results depend on routing, location, and server load.
+
+## Useful options
+
+```text
+--quick              ~60s smoke profile
+--full               stronger 5–8 min profile
+-d, --duration SEC   seconds per timed test
+-z, --size SIZE      fio test file size, e.g. 512M, 2G, 8G
+-t, --threads N      CPU/memory benchmark threads
+-n, --no-install     do not install missing packages
+
+--network            Cloudflare network sanity test (default)
+--network-full       Cloudflare + 3 public iperf3 regions
+--network-yabs       Cloudflare + current YABS public iperf3 list
+--no-network         skip network checks; local score remains comparable
+--iperf HOST[:PORT]  add your own iperf3 server; use [IPv6]:PORT for IPv6
+
+--net-info           check IPv4/IPv6 and external IP/ASN
+--json               print JSON result
+--json-file PATH     copy JSON result to PATH
+--verbose            print full system/tool header
+-h, --help           help
+```
+
+## Privacy and files
+
+ABS does **not** upload benchmark results.
+
+External calls:
+
+- default network check uses Cloudflare: about 25 MB download and 10 MB zero-data upload
+- `--network-full` and `--network-yabs` call public iperf3 servers
+- `--net-info` calls external IP/ASN endpoints
+- default install mode may contact distro package mirrors
+
+Local output is saved in a private, randomly named `/tmp/abs.*` directory:
+
+- `results.tsv`
+- `result.json`
+- raw logs
+
+Disk test files use a unique private subdirectory under the selected test directory and are removed after the run. Existing `abs.test*` or `abs-dd.test` files in that directory are not touched. Multi-job fio pressure tests use disjoint file regions so overlapping writes cannot inflate throughput.
+
+## Tests
+
+```bash
+python3 -m unittest -v tests/test_abs.py
+```
+
+The regression suite covers scoring/verdict behavior, JSON output, command-injection rejection, private temporary paths, preservation of existing files, fio job partitioning, and package-manager safety. GitHub Actions runs it on every push and pull request.
+
+## License
+
+MIT
