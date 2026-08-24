@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 export LC_ALL=C
 
-VERSION="0.4.7"
+VERSION="0.4.8"
 TIME_START_EPOCH="$(date +%s)"
 TIME_START_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 VCPU="$(nproc 2>/dev/null || echo 1)"
@@ -514,7 +514,7 @@ PY
 
 network_score() {
   if [ "$NETWORK" != "1" ]; then
-    printf 'PARTIAL - not comparable: missing network (--no-network)'
+    printf 'N/A - skipped (network excluded; local score is standalone)'
     return 0
   fi
   NETWORK_PROFILE_IN="$NETWORK_PROFILE" IPERF_SERVER_IN="$IPERF_SERVER" python3 - "$RESULTS" <<'PY'
@@ -592,7 +592,7 @@ elif requires_iperf:
     pairs = min(len(send_vals), len(recv_vals))
     print(f'PARTIAL - not comparable: iperf3 results {pairs}/{expected} pairs')
 else:
-    print(f'SANITY {cf_score} (Cloudflare HTTP; included in ABS score)')
+    print(f'SANITY {cf_score} (Cloudflare HTTP; reference only, not in score)')
 PY
 }
 
@@ -602,17 +602,20 @@ abs_score() {
 import re, sys
 local_text, net_text = sys.argv[1], sys.argv[2]
 ml = re.search(r'FULL\s+(\d+)', local_text or '')
-mn = re.search(r'(?:FULL|SANITY)\s+(\d+)', net_text or '')
 if not ml:
     print('PARTIAL - not comparable: missing local core')
     raise SystemExit
 local = int(ml.group(1))
+# VERDICT: local score stands on its own. Network is informational only and
+# does NOT mix into the headline score (avoids a noisy single-point Cloudflare
+# sample dragging down a solid local profile). Network line is appended purely
+# as a reference note for the user.
+mn = re.search(r'(?:FULL|SANITY)\s+(\d+)', net_text or '')
 if not mn:
-    print(f'PARTIAL - not comparable: {local} (local only; missing network)')
-    raise SystemExit
-network = int(mn.group(1))
-score = round(local * 0.80 + network * 0.20)
-print(f'FULL {score} (80% local + 20% network; local {local}, network {network})')
+    print(f'FULL {local} (local only; network excluded from score)')
+else:
+    network = int(mn.group(1))
+    print(f'FULL {local} (local only; network reference {network})')
 PY
 }
 
@@ -955,15 +958,15 @@ out = {
     },
     'score': {
         'text': score_text,
-        'scope': 'local_plus_network',
-        'includes_network': True,
+        'scope': 'local_only',
+        'includes_network': False,
         'status': score_status,
         'value': score_value,
         'comparable': score_status == 'full',
         'missing_components': missing_components,
     },
     'local_score': {'text': local_score_text, 'scope': 'local_cpu_memory_disk_fsync'},
-    'network_score': {'text': network_score_text, 'included_in_score': True, 'weight': 0.20},
+    'network_score': {'text': network_score_text, 'included_in_score': False, 'weight': 0.0},
     'verdict': {'text': verdict_text, 'code': verdict_code, 'reason': verdict_reason},
     'results': rows,
 }
@@ -1200,7 +1203,7 @@ else
   add "Network component" "$NETWORK_SCORE_TEXT"
   add "ABS VERDICT" "$VERDICT_TEXT"
 fi
-add_note "Score note" "ABS score includes network: 80% local CPU/memory/disk/fsync + 20% network. Default network is Cloudflare sanity; --network-full adds 3 public iperf3 regions; --network-yabs uses the YABS list. Use --no-network only for a non-comparable local-only run."
+add_note "Score note" "ABS score is LOCAL-only: 100% CPU/memory/disk/fsync. Network (Cloudflare sanity or iperf3) is reported separately as a reference and does NOT change the headline score. Use --network-full / --network-yabs / --iperf to see network numbers, or --no-network to skip them entirely."
 add_note "Privacy note" "No result upload. Default network sanity uses Cloudflare (25 MB down, 10 MB zero-data up); package install may contact distro mirrors unless -n is used. --net-info calls IP/ASN endpoints; --no-network skips speed checks."
 
 ELAPSED_SECONDS=$(( $(date +%s) - TIME_START_EPOCH ))

@@ -29,10 +29,10 @@ At the end, look for this block:
 
 ```text
 ==================== ABS RESULT ====================
-SCORE   : FULL 2624 (80% local + 20% network; local 2771, network 2038)
+SCORE   : FULL 2771 (local only; network reference 2038)
 VERDICT : KEEP - practical VPS profile looks acceptable
 LOCAL   : FULL 2771 (local only: cpu,mem,disk,fsync; network excluded)
-NETWORK : SANITY 2038 (Cloudflare HTTP; included in ABS score)
+NETWORK : SANITY 2038 (Cloudflare HTTP; reference only, not in score)
 ====================================================
 ```
 
@@ -41,9 +41,9 @@ Meaning:
 - **KEEP** — looks good for practical VPS use
 - **MAYBE** — usable, but has weaknesses or depends on price/location
 - **AVOID** — weak result; probably not worth keeping
-- **INCOMPLETE** — important tests failed or were skipped
+- **INCOMPLETE** — an important local test (CPU, memory, disk, or fsync) failed or was skipped
 
-If you see `PARTIAL - not comparable`, do not compare that score with full runs. Usually `fio`, `python3`, or network access was missing.
+If the local score says `PARTIAL - not comparable`, do not compare it with full runs. Usually `fio`, `python3`, or another local benchmark dependency was missing. Network failures are reported separately and do not make an otherwise complete local result incomplete.
 
 ## Bigger specs can be worse
 
@@ -110,10 +110,10 @@ If `fio` is missing, ABS may run a small `dd` disk fallback. That fallback is on
 Headline score:
 
 ```text
-80% local CPU/memory/disk/fsync + 20% network
+40% CPU + 15% memory + 30% disk QD1 + 15% fsync
 ```
 
-ABS also prints separate local and network components so you can see what helped or hurt the result.
+The headline score is local-only. ABS prints network results separately as a diagnostic reference; they never raise or lower the score or change a complete local verdict to `INCOMPLETE`.
 
 Network is useful but noisy. Cloudflare and public iperf3 results depend on routing, location, and server load.
 
@@ -130,7 +130,7 @@ Network is useful but noisy. Cloudflare and public iperf3 results depend on rout
 --network            Cloudflare network sanity test (default)
 --network-full       Cloudflare + 3 public iperf3 regions
 --network-yabs       Cloudflare + current YABS public iperf3 list
---no-network         skip network checks; score becomes partial
+--no-network         skip network checks; local score remains comparable
 --iperf HOST[:PORT]  add your own iperf3 server
 
 --net-info           check IPv4/IPv6 and external IP/ASN
