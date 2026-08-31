@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 export LC_ALL=C
 
-VERSION="0.5.0"
+VERSION="0.5.1"
 TIME_START_EPOCH="$(date +%s)"
 TIME_START_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 VCPU="$(nproc 2>/dev/null || echo 1)"
@@ -447,7 +447,7 @@ install_tools() {
 zh_metric() {
   local metric="$1" suffix
   case "$metric" in
-    "Install mode") printf '安装模式' ;;
+    "Install mode") printf '依赖工具' ;;
     "CPU single thread") printf 'CPU 单线程' ;;
     "CPU all threads ("*")")
       suffix="${metric#CPU all threads (}"; suffix="${suffix%)}"; printf 'CPU 全线程（%s）' "$suffix" ;;
@@ -580,8 +580,10 @@ zh_result() {
       return ;;
     "N/A - skipped"*) printf '未测试（网络不计分；本地分数独立有效）'; return ;;
     "n/a (python3 missing)") printf '不可用（缺少 python3）'; return ;;
-    "package install attempted before benchmark; use -n for no-mutation mode") printf '测试前已尝试安装依赖；使用 -n 可避免改动系统'; return ;;
-    "no package install attempted") printf '未安装软件包'; return ;;
+    "all required tools available; no installation needed") printf '已齐全（无需安装）'; return ;;
+    "missing tools installed successfully") printf '已成功安装'; return ;;
+    "missing tools; installation disabled: "*) printf '缺少 %s（安装已禁用）' "${text#missing tools; installation disabled: }"; return ;;
+    "installation failed; still missing: "*) printf '安装失败，仍缺少 %s' "${text#installation failed; still missing: }"; return ;;
     FAILED\ \(timeout\ after\ *\)\;\ see\ *)
       printf '超时；详见 %s' "${text##*; see }"; return ;;
     "FAILED; see "*) printf '失败；详见 %s' "${text#FAILED; see }"; return ;;
@@ -1568,10 +1570,14 @@ else
   printf '%-48s %s\n' "------" "------"
 fi
 
-if [ "$INSTALL_ATTEMPTED" = "1" ]; then
-  add "Install mode" "package install attempted before benchmark; use -n for no-mutation mode"
+if [ "$INSTALL_ATTEMPTED" = "1" ] && [ -z "$MISSING_AFTER_INSTALL" ]; then
+  add "Install mode" "missing tools installed successfully"
+elif [ "$INSTALL_ATTEMPTED" = "1" ]; then
+  add "Install mode" "installation failed; still missing: $MISSING_AFTER_INSTALL"
+elif [ -n "$MISSING_AFTER_INSTALL" ]; then
+  add "Install mode" "missing tools; installation disabled: $MISSING_AFTER_INSTALL"
 else
-  add "Install mode" "no package install attempted"
+  add "Install mode" "all required tools available; no installation needed"
 fi
 
 if have sysbench; then

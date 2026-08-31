@@ -137,6 +137,24 @@ class AbsTests(unittest.TestCase):
         )
         self.assertEqual(proc.stdout, "谨慎保留 — 磁盘性能偏弱")
 
+    def test_dependency_tools_status_is_clear(self) -> None:
+        metric = extract_between(self.source, "zh_metric() {", "\n}\n\nzh_components()") + "\n}\n"
+        result = extract_between(self.source, "zh_result() {", "\n}\n\nadd()") + "\n}\n"
+        proc = subprocess.run(
+            [
+                "bash",
+                "-c",
+                metric
+                + result
+                + "\nprintf '%s：' \"$(zh_metric 'Install mode')\"\n"
+                + "zh_result 'all required tools available; no installation needed'",
+            ],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        self.assertEqual(proc.stdout, "依赖工具：已齐全（无需安装）")
+
     def test_interrupted_dpkg_error_is_visible(self) -> None:
         language = extract_between(self.source, "is_zh() {", "\n\nusage()")
         install = extract_between(self.source, "install_error_summary() {", "\n}\n\ninstall_tools()") + "\n}\n"
