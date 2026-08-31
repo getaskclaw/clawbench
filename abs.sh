@@ -326,7 +326,9 @@ fi
 find_fio_bin() {
   local p
   for p in "$(command -v fio 2>/dev/null || true)" /usr/bin/fio /usr/local/bin/fio; do
-    [ -n "$p" ] && [ -x "$p" ] || continue
+    if [ -z "$p" ] || [ ! -x "$p" ]; then
+      continue
+    fi
     if "$p" --version 2>/dev/null | grep -q '^fio-'; then
       printf '%s\n' "$p"
       return 0
