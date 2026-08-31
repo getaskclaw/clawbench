@@ -115,6 +115,83 @@ class AbsTests(unittest.TestCase):
     def test_bash_syntax(self) -> None:
         subprocess.run(["bash", "-n", str(SCRIPT)], check=True)
 
+    def test_help_defaults_to_chinese_and_supports_english(self) -> None:
+        zh = subprocess.run([str(SCRIPT), "--help"], text=True, capture_output=True, check=True)
+        en = subprocess.run([str(SCRIPT), "--lang", "en", "--help"], text=True, capture_output=True, check=True)
+        self.assertIn("AskClaw VPS 跑分脚本", zh.stdout)
+        self.assertIn("输出语言，默认 zh", zh.stdout)
+        self.assertIn("AskClaw Benchmark Script", en.stdout)
+        self.assertIn("output language; default zh", en.stdout)
+
+    def test_chinese_verdict_is_concise(self) -> None:
+        helpers = extract_between(self.source, "zh_reason() {", "\n}\n\nzh_result()") + "\n}\n"
+        proc = subprocess.run(
+            [
+                "bash",
+                "-c",
+                helpers + "\nzh_verdict 'MAYBE - disk component is weak (component score 288); weak durable-write/fsync'",
+            ],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        self.assertEqual(proc.stdout, "谨慎保留 — 磁盘性能偏弱")
+
+    def test_interrupted_dpkg_error_is_visible(self) -> None:
+        language = extract_between(self.source, "is_zh() {", "\n\nusage()")
+        install = extract_between(self.source, "install_error_summary() {", "\n}\n\ninstall_tools()") + "\n}\n"
+        with tempfile.TemporaryDirectory() as td:
+            log = Path(td) / "install-apt.err"
+            log.write_text("E: dpkg was interrupted, you must manually run 'dpkg --configure -a'\n", encoding="utf-8")
+            proc = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    language + "\n" + install + '\nABS_LANG=zh\nINSTALL_ERROR_LOG="$1"\nshow_install_error',
+                    "bash",
+                    str(log),
+                ],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+        self.assertIn("依赖安装失败：dpkg 上次操作被中断", proc.stdout)
+        self.assertIn("sudo dpkg --configure -a", proc.stdout)
+        self.assertIn(str(log), proc.stdout)
+
+    def test_cloudflare_download_retries_once(self) -> None:
+        helper = extract_between(self.source, "cloudflare_download() {", "\n}\n\ncloudflare_upload()") + "\n}\n"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            count = root / "count"
+            args = root / "args"
+            count.write_text("0", encoding="utf-8")
+            script = (
+                "curl() {\n"
+                "  local n; n=$(cat \"$COUNT\"); n=$((n + 1)); printf '%s' \"$n\" >\"$COUNT\"\n"
+                "  printf '%s\\n' \"$*\" >>\"$ARGS\"\n"
+                "  if [ \"$n\" -eq 1 ]; then echo 'curl: (28) timeout' >&2; return 28; fi\n"
+                "  printf '1000000'\n"
+                "}\n"
+                + helper
+                + "\ncloudflare_download\nprintf '%s|%s\\n' \"$NETWORK_VALUE\" \"$(cat \"$COUNT\")\"\n"
+            )
+            env = os.environ.copy()
+            env.update(
+                {
+                    "COUNT": str(count),
+                    "ARGS": str(args),
+                    "LOGDIR": str(root),
+                    "NETWORK_TIMEOUT": "45",
+                    "NETWORK_DOWNLOAD_BYTES": "10000000",
+                }
+            )
+            proc = subprocess.run(["bash", "-c", script], env=env, text=True, capture_output=True, check=True)
+            called_with = args.read_text(encoding="utf-8")
+        self.assertEqual(proc.stdout.strip(), "1000000|2")
+        self.assertEqual(called_with.count("bytes=10000000"), 2)
+        self.assertIn("--max-time 45", called_with)
+
     def test_score_uses_local_only_and_network_is_reference(self) -> None:
         match = re.search(
             r"abs_score\(\) \{\n  python3 - \"\$LOCAL_SCORE_TEXT\" \"\$NETWORK_SCORE_TEXT\" <<'PY'\n(.*?)\nPY\n\}",
@@ -314,6 +391,7 @@ class AbsTests(unittest.TestCase):
             payload = f"host:1-x[$(touch {marker})]"
             env = os.environ.copy()
             env["DIR"] = str(data_dir)
+            env["ABS_LANG"] = "en"
             proc = subprocess.run(
                 [str(SCRIPT), "--quick", "-n", "--iperf", payload, "--no-network"],
                 env=env,
@@ -327,6 +405,17 @@ class AbsTests(unittest.TestCase):
 
     def test_arch_install_does_not_sync_without_upgrade(self) -> None:
         self.assertNotIn("pacman -Sy --noconfirm", self.source)
+
+    def test_package_manager_failures_are_logged(self) -> None:
+        body = extract_between(self.source, "install_tools() {", "\n}\n\nzh_metric()")
+        for log_name in (
+            "install-apt.err",
+            "install-dnf.err",
+            "install-yum.err",
+            "install-pacman.err",
+            "install-apk.err",
+        ):
+            self.assertIn(f'run_package_command "$LOGDIR/{log_name[:-4]}.log" "$LOGDIR/{log_name}"', body)
 
     def test_default_logdir_is_private_mktemp_directory(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -346,6 +435,7 @@ class AbsTests(unittest.TestCase):
                     "DIR": str(data_dir),
                     "TMPDIR": str(tmp_dir),
                     "INSTALL": "0",
+                    "ABS_LANG": "en",
                 }
             )
             proc = subprocess.run(
@@ -388,6 +478,7 @@ class AbsTests(unittest.TestCase):
                     "DIR": str(data_dir),
                     "LOGDIR": str(log_dir),
                     "INSTALL": "0",
+                    "ABS_LANG": "en",
                     "FAKE_FIO_TRACE": str(root / "fio-args.jsonl"),
                 }
             )
@@ -405,6 +496,9 @@ class AbsTests(unittest.TestCase):
             self.assertFalse(result["score"]["includes_network"])
             self.assertEqual(result["network_score"]["weight"], 0.0)
             self.assertEqual(result["verdict"]["code"], "MAYBE")
+            result_metrics = {row["metric"] for row in result["results"]}
+            self.assertIn("cpu component score", result_metrics)
+            self.assertIn("disk component score", result_metrics)
             calls = [json.loads(line) for line in (root / "fio-args.jsonl").read_text().splitlines()]
             pressure_calls = []
             for call in calls:
@@ -439,6 +533,7 @@ class AbsTests(unittest.TestCase):
                     "DIR": str(data_dir),
                     "LOGDIR": str(log_dir),
                     "INSTALL": "0",
+                    "ABS_LANG": "en",
                     "DIRECT": "0",
                 }
             )
@@ -473,6 +568,7 @@ class AbsTests(unittest.TestCase):
                     "DIR": str(data_dir),
                     "LOGDIR": str(log_dir),
                     "INSTALL": "0",
+                    "ABS_LANG": "en",
                 }
             )
             proc = subprocess.run(

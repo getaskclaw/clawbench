@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 export LC_ALL=C
 
-VERSION="0.4.9"
+VERSION="0.5.0"
 TIME_START_EPOCH="$(date +%s)"
 TIME_START_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 VCPU="$(nproc 2>/dev/null || echo 1)"
@@ -27,11 +27,16 @@ IPERF_PARALLEL="${IPERF_PARALLEL:-2}"
 VERBOSE="${VERBOSE:-0}"
 JSON_PRINT="${JSON_PRINT:-0}"
 JSON_FILE="${JSON_FILE:-}"
+ABS_LANG="${ABS_LANG:-zh}"
+NETWORK_TIMEOUT="${NETWORK_TIMEOUT:-45}"
+NETWORK_DOWNLOAD_BYTES="${NETWORK_DOWNLOAD_BYTES:-10000000}"
+NETWORK_UPLOAD_BYTES="${NETWORK_UPLOAD_BYTES:-5000000}"
 LOGDIR_OVERRIDE="${LOGDIR-}"
 LOGDIR=""
 
 RESULTS=""
 JSON_RESULT=""
+COMPONENTS_FILE=""
 RUN_DIR=""
 FIO_FILE=""
 FIO_BIN=""
@@ -44,10 +49,59 @@ NETWORK_SCORE_TEXT="skipped"
 VERDICT_TEXT="n/a"
 INSTALL_ATTEMPTED="0"
 MISSING_AFTER_INSTALL=""
+INSTALL_ERROR_LOG=""
 FINAL_STATUS=0
 
+is_zh() { [ "$ABS_LANG" = "zh" ]; }
+
+say() {
+  if is_zh; then printf '%s\n' "$1"; else printf '%s\n' "$2"; fi
+}
+
+die() {
+  say "$1" "$2" >&2
+  exit 2
+}
+
 usage() {
-  cat <<EOF
+  if is_zh; then
+    cat <<EOF
+ABS v$VERSION — AskClaw VPS 跑分脚本
+
+一键运行：
+  curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash
+
+默认测试约 3 分钟，包含简短网络检查，不上传结果。
+
+选项：
+  --quick              快速检查，约 60 秒
+  --full               更完整的测试，约 5–8 分钟
+  -d, --duration SEC   每项测试时长
+  -z, --size SIZE      fio 测试文件大小，如 512M、2G、8G
+  -t, --threads N      CPU/内存测试线程数
+  -n, --no-install     不安装缺失工具
+  --lang zh|en         输出语言，默认 zh
+  --net-info           查询 IPv4/IPv6 和外部 IP/ASN
+  --no-net-info        不查询外部 IP/ASN（默认）
+  --network            Cloudflare 简短网络检查（默认）
+  --network-full       Cloudflare + 3 个公共 iperf3 区域
+  --network-yabs       Cloudflare + YABS 公共 iperf3 列表
+  --no-network         跳过网络测速
+  --iperf HOST[:PORT]  添加自定义 iperf3 服务器
+  --verbose            显示完整系统信息
+  --json               在结尾打印 JSON
+  --json-file PATH     另存 JSON 到指定路径
+  -h, --help           帮助
+
+示例：
+  curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash -s -- --quick -n
+  curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash -s -- --lang en
+
+也可使用环境变量：ABS_LANG=en PROFILE=full SIZE=8G INSTALL=0 bash abs.sh
+EOF
+  else
+    cat <<EOF
 ABS v$VERSION — AskClaw Benchmark Script
 
 One-line run:
@@ -63,6 +117,7 @@ Options:
   -z, --size SIZE      fio test file size, e.g. 512M, 2G, 8G; default auto
   -t, --threads N      CPU/memory threads; default detected vCPU ($T)
   -n, --no-install     do not install missing packages
+  --lang zh|en         output language; default zh
   --net-info           check IPv4/IPv6 and external IP/ASN
   --no-net-info        skip external IP/ASN lookup (default)
   --network            run Cloudflare HTTP network sanity test (default)
@@ -80,8 +135,9 @@ Examples:
   curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash -s -- --quick -n
   curl -fsSL https://raw.githubusercontent.com/getaskclaw/abs/main/abs.sh | bash -s -- --full -z 8G --json
 
-Env overrides also work: PROFILE=full SIZE=8G INSTALL=0 bash abs.sh
+Env overrides also work: ABS_LANG=en PROFILE=full SIZE=8G INSTALL=0 bash abs.sh
 EOF
+  fi
 }
 
 D_SET=0
@@ -94,15 +150,18 @@ while [ "$#" -gt 0 ]; do
     --quick) PROFILE="quick" ;;
     --full) PROFILE="full" ;;
     -d|--duration)
-      shift; [ "$#" -gt 0 ] || { echo "Missing value for -d/--duration" >&2; exit 2; }
+      shift; [ "$#" -gt 0 ] || die "缺少参数值：-d/--duration" "Missing value for -d/--duration"
       D="$1"; D_SET=1 ;;
     -z|--size)
-      shift; [ "$#" -gt 0 ] || { echo "Missing value for -z/--size" >&2; exit 2; }
+      shift; [ "$#" -gt 0 ] || die "缺少参数值：-z/--size" "Missing value for -z/--size"
       SIZE="$1"; SIZE_SET=1 ;;
     -t|--threads)
-      shift; [ "$#" -gt 0 ] || { echo "Missing value for -t/--threads" >&2; exit 2; }
+      shift; [ "$#" -gt 0 ] || die "缺少参数值：-t/--threads" "Missing value for -t/--threads"
       T="$1" ;;
     -n|--no-install) INSTALL=0 ;;
+    --lang)
+      shift; [ "$#" -gt 0 ] || die "缺少参数值：--lang" "Missing value for --lang"
+      ABS_LANG="$1" ;;
     --net-info) NET_INFO=1 ;;
     --no-net-info) NET_INFO=0 ;;
     --network) NETWORK=1; NETWORK_PROFILE="cloudflare" ;;
@@ -110,15 +169,15 @@ while [ "$#" -gt 0 ]; do
     --network-yabs) NETWORK=1; NETWORK_PROFILE="yabs" ;;
     --no-network) NETWORK=0; NETWORK_PROFILE="none" ;;
     --iperf)
-      shift; [ "$#" -gt 0 ] || { echo "Missing value for --iperf" >&2; exit 2; }
+      shift; [ "$#" -gt 0 ] || die "缺少参数值：--iperf" "Missing value for --iperf"
       IPERF_SERVER="$1"; NETWORK=1 ;;
     --verbose) VERBOSE=1 ;;
     --json) JSON_PRINT=1 ;;
     --json-file)
-      shift; [ "$#" -gt 0 ] || { echo "Missing value for --json-file" >&2; exit 2; }
+      shift; [ "$#" -gt 0 ] || die "缺少参数值：--json-file" "Missing value for --json-file"
       JSON_FILE="$1" ;;
     -h|--help) usage; exit 0 ;;
-    *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
+    *) say "未知选项：$1" "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
   shift
 done
@@ -137,7 +196,7 @@ case "$PROFILE" in
     PROFILE_TARGET="5–8 minutes"
     [ "$D_SET" -eq 1 ] || D=30
     ;;
-  *) echo "Invalid PROFILE: $PROFILE" >&2; exit 2 ;;
+  *) die "PROFILE 无效：$PROFILE" "Invalid PROFILE: $PROFILE" ;;
 esac
 
 is_pos_int() { [[ "${1:-}" =~ ^[1-9][0-9]*$ ]]; }
@@ -177,19 +236,22 @@ parse_custom_iperf() {
   IPERF_CUSTOM_PORT="$port"
 }
 
-if ! is_pos_int "$D"; then echo "Invalid duration: $D" >&2; exit 2; fi
-if ! is_pos_int "$T"; then echo "Invalid threads: $T" >&2; exit 2; fi
-if ! is_pos_int "$DEPTH"; then echo "Invalid DEPTH: $DEPTH" >&2; exit 2; fi
-if ! is_pos_int "$IPERF_TIME"; then echo "Invalid IPERF_TIME: $IPERF_TIME" >&2; exit 2; fi
-if ! is_pos_int "$IPERF_PARALLEL"; then echo "Invalid IPERF_PARALLEL: $IPERF_PARALLEL" >&2; exit 2; fi
-if [ "$DIRECT" != "0" ] && [ "$DIRECT" != "1" ]; then echo "Invalid DIRECT: $DIRECT" >&2; exit 2; fi
-if [ "$NET_INFO" != "0" ] && [ "$NET_INFO" != "1" ]; then echo "Invalid NET_INFO: $NET_INFO" >&2; exit 2; fi
-if [ "$NETWORK" != "0" ] && [ "$NETWORK" != "1" ]; then echo "Invalid NETWORK: $NETWORK" >&2; exit 2; fi
-case "$NETWORK_PROFILE" in cloudflare|full|yabs|none) ;; *) echo "Invalid NETWORK_PROFILE: $NETWORK_PROFILE" >&2; exit 2 ;; esac
-if [ "$VERBOSE" != "0" ] && [ "$VERBOSE" != "1" ]; then echo "Invalid VERBOSE: $VERBOSE" >&2; exit 2; fi
+if ! is_pos_int "$D"; then die "测试时长无效：$D" "Invalid duration: $D"; fi
+if ! is_pos_int "$T"; then die "线程数无效：$T" "Invalid threads: $T"; fi
+if ! is_pos_int "$DEPTH"; then die "DEPTH 无效：$DEPTH" "Invalid DEPTH: $DEPTH"; fi
+if ! is_pos_int "$IPERF_TIME"; then die "IPERF_TIME 无效：$IPERF_TIME" "Invalid IPERF_TIME: $IPERF_TIME"; fi
+if ! is_pos_int "$IPERF_PARALLEL"; then die "IPERF_PARALLEL 无效：$IPERF_PARALLEL" "Invalid IPERF_PARALLEL: $IPERF_PARALLEL"; fi
+if [ "$DIRECT" != "0" ] && [ "$DIRECT" != "1" ]; then die "DIRECT 无效：$DIRECT" "Invalid DIRECT: $DIRECT"; fi
+case "$ABS_LANG" in zh|en) ;; *) echo "Invalid --lang: $ABS_LANG (expected zh or en)" >&2; exit 2 ;; esac
+if ! is_pos_int "$NETWORK_TIMEOUT"; then die "NETWORK_TIMEOUT 无效：$NETWORK_TIMEOUT" "Invalid NETWORK_TIMEOUT: $NETWORK_TIMEOUT"; fi
+if ! is_pos_int "$NETWORK_DOWNLOAD_BYTES"; then die "NETWORK_DOWNLOAD_BYTES 无效：$NETWORK_DOWNLOAD_BYTES" "Invalid NETWORK_DOWNLOAD_BYTES: $NETWORK_DOWNLOAD_BYTES"; fi
+if ! is_pos_int "$NETWORK_UPLOAD_BYTES"; then die "NETWORK_UPLOAD_BYTES 无效：$NETWORK_UPLOAD_BYTES" "Invalid NETWORK_UPLOAD_BYTES: $NETWORK_UPLOAD_BYTES"; fi
+if [ "$NET_INFO" != "0" ] && [ "$NET_INFO" != "1" ]; then die "NET_INFO 无效：$NET_INFO" "Invalid NET_INFO: $NET_INFO"; fi
+if [ "$NETWORK" != "0" ] && [ "$NETWORK" != "1" ]; then die "NETWORK 无效：$NETWORK" "Invalid NETWORK: $NETWORK"; fi
+case "$NETWORK_PROFILE" in cloudflare|full|yabs|none) ;; *) die "NETWORK_PROFILE 无效：$NETWORK_PROFILE" "Invalid NETWORK_PROFILE: $NETWORK_PROFILE" ;; esac
+if [ "$VERBOSE" != "0" ] && [ "$VERBOSE" != "1" ]; then die "VERBOSE 无效：$VERBOSE" "Invalid VERBOSE: $VERBOSE"; fi
 if [ -n "$IPERF_SERVER" ] && ! parse_custom_iperf "$IPERF_SERVER"; then
-  echo "Invalid --iperf endpoint: $IPERF_SERVER (expected HOST[:PORT], [IPv6]:PORT, or IPv6)" >&2
-  exit 2
+  die "--iperf 地址无效：$IPERF_SERVER" "Invalid --iperf endpoint: $IPERF_SERVER (expected HOST[:PORT], [IPv6]:PORT, or IPv6)"
 fi
 
 if [ -n "$JOBS_ENV" ]; then
@@ -197,7 +259,7 @@ if [ -n "$JOBS_ENV" ]; then
 else
   JOBS=$(( T < 4 ? T : 4 ))
 fi
-if ! is_pos_int "$JOBS"; then echo "Invalid JOBS: $JOBS" >&2; exit 2; fi
+if ! is_pos_int "$JOBS"; then die "JOBS 无效：$JOBS" "Invalid JOBS: $JOBS"; fi
 
 mkdir -p -- "$DIR"
 if [ -n "$LOGDIR_OVERRIDE" ]; then
@@ -208,6 +270,7 @@ else
 fi
 RESULTS="$LOGDIR/results.tsv"
 JSON_RESULT="$LOGDIR/result.json"
+COMPONENTS_FILE="$LOGDIR/components.tsv"
 printf 'Metric\tResult\n' > "$RESULTS"
 
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -291,6 +354,40 @@ missing_tools() {
   printf '%s\n' "${missing[@]}"
 }
 
+run_package_command() {
+  local out="$1" err="$2"
+  shift 2
+  if sudo_cmd "$@" >"$out" 2>"$err"; then
+    return 0
+  fi
+  INSTALL_ERROR_LOG="$err"
+  return 1
+}
+
+install_error_summary() {
+  local log="$1"
+  [ -s "$log" ] || return 0
+  awk 'BEGIN {IGNORECASE=1}
+       /dpkg was interrupted|^E:|error:|failed/ {print; found=1; exit}
+       NF {last=$0}
+       END {if (!found && last != "") print last}' "$log"
+}
+
+show_install_error() {
+  local summary
+  [ -n "$INSTALL_ERROR_LOG" ] || return 0
+  summary="$(install_error_summary "$INSTALL_ERROR_LOG")"
+  if [[ "$summary" == *"dpkg was interrupted"* ]]; then
+    say "依赖安装失败：dpkg 上次操作被中断。" "Dependency installation failed: dpkg was interrupted."
+    say "请先运行：sudo dpkg --configure -a" "Run this first: sudo dpkg --configure -a"
+  elif [ -n "$summary" ]; then
+    say "依赖安装失败：$summary" "Dependency installation failed: $summary"
+  else
+    say "依赖安装失败，详见：$INSTALL_ERROR_LOG" "Dependency installation failed; see $INSTALL_ERROR_LOG"
+  fi
+  say "安装日志：$INSTALL_ERROR_LOG" "Install log: $INSTALL_ERROR_LOG"
+}
+
 install_tools() {
   local missing
   missing="$(missing_tools | xargs 2>/dev/null || true)"
@@ -302,8 +399,8 @@ install_tools() {
   fi
 
   INSTALL_ATTEMPTED="1"
-  echo "Missing tools: $missing"
-  echo "Installing missing tools when possible... use -n/--no-install to skip installation."
+  say "缺少工具：$missing" "Missing tools: $missing"
+  say "正在尝试安装；使用 -n/--no-install 可跳过安装。" "Installing missing tools when possible... use -n/--no-install to skip installation."
 
   local curl_pkg="" iperf_pkg=""
   if [ "$NETWORK" = "1" ] || [ "$NET_INFO" = "1" ]; then
@@ -314,35 +411,216 @@ install_tools() {
   fi
 
   if have apt-get; then
-    sudo_cmd env DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null 2>"$LOGDIR/install-apt-update.err" || true
-    sudo_cmd env DEBIAN_FRONTEND=noninteractive apt-get install -y sysbench fio python3 ca-certificates procps $curl_pkg $iperf_pkg \
-      >"$LOGDIR/install-apt.log" 2>"$LOGDIR/install-apt.err" || true
+    run_package_command "$LOGDIR/install-apt-update.log" "$LOGDIR/install-apt-update.err" \
+      env DEBIAN_FRONTEND=noninteractive apt-get update -y || true
+    run_package_command "$LOGDIR/install-apt.log" "$LOGDIR/install-apt.err" \
+      env DEBIAN_FRONTEND=noninteractive apt-get install -y sysbench fio python3 ca-certificates procps $curl_pkg $iperf_pkg || true
   elif have dnf; then
-    sudo_cmd dnf install -y sysbench fio python3 procps-ng $curl_pkg $iperf_pkg >"$LOGDIR/install-dnf.log" 2>"$LOGDIR/install-dnf.err" || true
+    run_package_command "$LOGDIR/install-dnf.log" "$LOGDIR/install-dnf.err" \
+      dnf install -y sysbench fio python3 procps-ng $curl_pkg $iperf_pkg || true
   elif have yum; then
-    sudo_cmd yum install -y epel-release >"$LOGDIR/install-yum-epel.log" 2>"$LOGDIR/install-yum-epel.err" || true
-    sudo_cmd yum install -y sysbench fio python3 procps-ng $curl_pkg $iperf_pkg >"$LOGDIR/install-yum.log" 2>"$LOGDIR/install-yum.err" || true
+    run_package_command "$LOGDIR/install-yum-epel.log" "$LOGDIR/install-yum-epel.err" \
+      yum install -y epel-release || true
+    run_package_command "$LOGDIR/install-yum.log" "$LOGDIR/install-yum.err" \
+      yum install -y sysbench fio python3 procps-ng $curl_pkg $iperf_pkg || true
   elif have pacman; then
     # Do not use `pacman -Sy`: syncing package metadata without a full upgrade
     # creates an unsupported partial-upgrade state on Arch Linux.
-    sudo_cmd pacman -S --needed --noconfirm sysbench fio python procps $curl_pkg $iperf_pkg >"$LOGDIR/install-pacman.log" 2>"$LOGDIR/install-pacman.err" || true
+    run_package_command "$LOGDIR/install-pacman.log" "$LOGDIR/install-pacman.err" \
+      pacman -S --needed --noconfirm sysbench fio python procps $curl_pkg $iperf_pkg || true
   elif have apk; then
-    sudo_cmd apk add --no-cache sysbench fio python3 procps $curl_pkg $iperf_pkg >"$LOGDIR/install-apk.log" 2>"$LOGDIR/install-apk.err" || true
+    run_package_command "$LOGDIR/install-apk.log" "$LOGDIR/install-apk.err" \
+      apk add --no-cache sysbench fio python3 procps $curl_pkg $iperf_pkg || true
   fi
 
   have_fio || true
   missing="$(missing_tools | xargs 2>/dev/null || true)"
   MISSING_AFTER_INSTALL="$missing"
-  [ -z "$missing" ] || echo "Still missing after install attempt: $missing; affected tests will be skipped."
+  if [ -n "$missing" ]; then
+    say "安装后仍缺少：$missing；相关测试将跳过。" "Still missing after install attempt: $missing; affected tests will be skipped."
+    show_install_error
+  fi
+}
+
+zh_metric() {
+  local metric="$1" suffix
+  case "$metric" in
+    "Install mode") printf '安装模式' ;;
+    "CPU single thread") printf 'CPU 单线程' ;;
+    "CPU all threads ("*")")
+      suffix="${metric#CPU all threads (}"; suffix="${suffix%)}"; printf 'CPU 全线程（%s）' "$suffix" ;;
+    "Memory read ("*" threads)")
+      suffix="${metric#Memory read (}"; suffix="${suffix% threads)}"; printf '内存读取（%s 线程）' "$suffix" ;;
+    "Memory write ("*" threads)")
+      suffix="${metric#Memory write (}"; suffix="${suffix% threads)}"; printf '内存写入（%s 线程）' "$suffix" ;;
+    "Memory read") printf '内存读取' ;;
+    "Memory write") printf '内存写入' ;;
+    "sysbench CPU/memory") printf 'sysbench CPU/内存测试' ;;
+    "fio disk tests") printf 'fio 磁盘测试' ;;
+    "fio prepare") printf 'fio 测试文件准备' ;;
+    "Disk sequential write") printf '磁盘顺序写入' ;;
+    "Disk sequential read") printf '磁盘顺序读取' ;;
+    "Disk random read 4K QD1") printf '磁盘 4K QD1 随机读取' ;;
+    "Disk random write 4K QD1") printf '磁盘 4K QD1 随机写入' ;;
+    "Disk random read 4K pressure") printf '磁盘 4K 随机读取（压力）' ;;
+    "Disk random write 4K pressure") printf '磁盘 4K 随机写入（压力）' ;;
+    "Disk random mixed 4K 60r/40w") printf '磁盘 4K 混合随机（60%%读/40%%写）' ;;
+    "Disk durable write 4K fsync") printf '磁盘 4K 持久化写入（fsync）' ;;
+    "Disk fallback dd") printf '磁盘 dd 备用测试' ;;
+    "Disk fallback dd write") printf '磁盘 dd 备用写入' ;;
+    "Disk fallback dd read") printf '磁盘 dd 备用读取' ;;
+    "Network sanity") printf '网络简测' ;;
+    "Network Cloudflare TTFB") printf '网络 Cloudflare TTFB' ;;
+    "Network Cloudflare download") printf '网络 Cloudflare 下载' ;;
+    "Network Cloudflare upload") printf '网络 Cloudflare 上传' ;;
+    "Network iperf3") printf '网络 iperf3' ;;
+    "Network iperf3 send "*) printf '网络 iperf3 发送 %s' "${metric#Network iperf3 send }" ;;
+    "Network iperf3 recv "*) printf '网络 iperf3 接收 %s' "${metric#Network iperf3 recv }" ;;
+    "cpu component score") printf 'CPU 分项得分' ;;
+    "mem component score") printf '内存分项得分' ;;
+    "disk component score") printf '磁盘分项得分' ;;
+    "fsync component score") printf 'fsync 分项得分' ;;
+    "ABS SCORE") printf '综合得分' ;;
+    "Local component") printf '本地得分' ;;
+    "Network component") printf '网络参考' ;;
+    "ABS VERDICT") printf '结论' ;;
+    "Score note") printf '评分说明' ;;
+    "Privacy note") printf '隐私说明' ;;
+    "JSON result") printf 'JSON 结果' ;;
+    "JSON copy") printf 'JSON 副本' ;;
+    *) printf '%s' "$metric" ;;
+  esac
+}
+
+zh_components() {
+  local text="$1"
+  text="${text//disk-buffered/磁盘（缓存模式）}"
+  text="${text//fsync-buffered/fsync（缓存模式）}"
+  text="${text//memory/内存}"
+  text="${text//cpu/CPU}"
+  text="${text//mem/内存}"
+  text="${text//disk/磁盘}"
+  printf '%s' "$text"
+}
+
+zh_reason() {
+  local reason="$1"
+  reason="${reason//practical VPS profile looks acceptable/本地性能整体良好}"
+  reason="${reason//usable, but has notable weaknesses/可以使用，但存在明显短板}"
+  reason="${reason//weak practical VPS performance/本地性能较弱}"
+  reason="${reason//critical CPU bottleneck (component score /CPU 严重瓶颈（分项得分 }"
+  reason="${reason//critical memory bottleneck (component score /内存严重瓶颈（分项得分 }"
+  reason="${reason//critical disk bottleneck (component score /磁盘严重瓶颈（分项得分 }"
+  reason="${reason//critical fsync bottleneck (component score /fsync 严重瓶颈（分项得分 }"
+  reason="${reason//CPU component is weak (component score /CPU 分项偏弱（得分 }"
+  reason="${reason//memory component is weak (component score /内存分项偏弱（得分 }"
+  reason="${reason//disk component is weak (component score /磁盘性能偏弱（得分 }"
+  reason="${reason//fsync component is weak (component score /fsync 性能偏弱（得分 }"
+  reason="${reason//weak durable-write\/fsync/持久化写入\/fsync 偏弱}"
+  reason="${reason//OpenVZ\/container storage can be cache-inflated/OpenVZ\/容器磁盘数据可能受缓存影响}"
+  reason="${reason//very high write\/fsync numbers; verify with --full before buying/写入\/fsync 数值异常高，购买前请用 --full 复测}"
+  reason="${reason//; /；}"
+  reason="${reason//)/）}"
+  printf '%s' "$reason"
+}
+
+zh_verdict() {
+  local text="$1" code reason label
+  code="${text%% - *}"
+  reason="${text#* - }"
+  case "$code" in
+    KEEP) label="保留" ;;
+    MAYBE) label="谨慎保留" ;;
+    AVOID) label="不建议保留" ;;
+    INCOMPLETE) label="测试不完整" ;;
+    *) printf '%s' "$text"; return ;;
+  esac
+  # Keep the terminal verdict concise. Full machine-readable details remain in
+  # TSV/JSON and in English mode.
+  reason="${reason%%; *}"
+  case "$reason" in
+    "missing required benchmark sections") reason="缺少必要测试项目" ;;
+    "python3 missing") reason="缺少 python3" ;;
+    *)
+      reason="$(zh_reason "$reason")"
+      reason="${reason%%（得分 *}"
+      reason="${reason%%（分项得分 *}"
+      ;;
+  esac
+  printf '%s — %s' "$label" "$reason"
+}
+
+zh_result() {
+  local text="$1" score network missing
+  case "$text" in
+    KEEP\ -*|MAYBE\ -*|AVOID\ -*|INCOMPLETE\ -*) zh_verdict "$text"; return ;;
+    FULL\ *)
+      score="$(printf '%s' "$text" | awk '{print $2}')"
+      if [[ "$text" == *"network reference "* ]]; then
+        network="${text##*network reference }"; network="${network%%)*}"
+        printf '完整，得分 %s（仅本地；网络参考分 %s）' "$score" "$network"
+      else
+        printf '完整，得分 %s（仅本地；网络不计分）' "$score"
+      fi
+      return ;;
+    PARTIAL\ -\ not\ comparable:*)
+      score="$(printf '%s' "$text" | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9]+$/){print $i; exit}}')"
+      missing="${text##*missing }"; missing="${missing%%;*}"; missing="${missing%%)*}"
+      if [ -n "$score" ]; then
+        printf '不完整，不能比较（当前分数 %s；缺少 %s）' "$score" "$(zh_components "$missing")"
+      else
+        printf '不完整，不能比较'
+      fi
+      return ;;
+    SANITY\ *)
+      score="$(printf '%s' "$text" | awk '{print $2}')"
+      printf '参考分 %s（Cloudflare HTTP，仅供参考，不计分）' "$score"
+      return ;;
+    "N/A - skipped"*) printf '未测试（网络不计分；本地分数独立有效）'; return ;;
+    "n/a (python3 missing)") printf '不可用（缺少 python3）'; return ;;
+    "package install attempted before benchmark; use -n for no-mutation mode") printf '测试前已尝试安装依赖；使用 -n 可避免改动系统'; return ;;
+    "no package install attempted") printf '未安装软件包'; return ;;
+    FAILED\ \(timeout\ after\ *\)\;\ see\ *)
+      printf '超时；详见 %s' "${text##*; see }"; return ;;
+    "FAILED; see "*) printf '失败；详见 %s' "${text#FAILED; see }"; return ;;
+    "FAILED: "*) printf '失败：%s' "${text#FAILED: }"; return ;;
+    "sysbench not installed; skipped") printf '未安装 sysbench，已跳过'; return ;;
+    "fio or python3 not installed; skipped") printf '未安装 fio 或 python3，已跳过'; return ;;
+    "curl not installed; skipped") printf '未安装 curl，已跳过'; return ;;
+    "iperf3 missing; skipped") printf '未安装 iperf3，已跳过'; return ;;
+    "dd not installed; skipped") printf '未安装 dd，已跳过'; return ;;
+    "invalid SIZE="*) printf 'SIZE 无效，已跳过：%s' "${text#invalid }"; return ;;
+    "not enough free space for "*) printf '可用空间不足，已跳过：%s' "${text#not enough free space for }"; return ;;
+    "ABS score is LOCAL-only:"*) printf 'ABS 总分仅计算本地 CPU、内存、磁盘和 fsync；网络仅供参考，不影响总分。'; return ;;
+    "No result upload."*) printf '不上传结果；网络检查会访问 Cloudflare，安装依赖会访问软件源。'; return ;;
+  esac
+  text="${text//events\/s/事件\/秒}"
+  text="${text//writes\/s/次写入\/秒}"
+  text="${text//write p95/写入 P95}"
+  text="${text//sync p95/同步 P95}"
+  text="${text//p95/P95}"
+  [[ "$text" == R\ * ]] && text="读 ${text#R }"
+  text="${text// \/ W / \/ 写 }"
+  text="${text//(not scored)/（不计分）}"
+  text="${text//(buffered; not scored)/（缓存模式，不计分）}"
+  printf '%s' "$text"
 }
 
 add() {
-  printf '%-48s %s\n' "$1" "$2"
+  if is_zh; then
+    printf '%s：%s\n' "$(zh_metric "$1")" "$(zh_result "$2")"
+  else
+    printf '%-48s %s\n' "$1" "$2"
+  fi
   printf '%s\t%s\n' "$1" "$2" >> "$RESULTS"
 }
 
 add_note() {
-  printf '%-48s %s\n' "$1" "$2"
+  if is_zh; then
+    printf '%s：%s\n' "$(zh_metric "$1")" "$(zh_result "$2")"
+  else
+    printf '%-48s %s\n' "$1" "$2"
+  fi
 }
 
 field() { awk -v key="$1" '$0 ~ key {print $NF; exit}' "$2"; }
@@ -503,8 +781,8 @@ PY
 }
 
 abs_local_score() {
-  python3 - "$RESULTS" "$T" "$DIRECT" <<'PY'
-import csv, math, re, sys
+  ABS_COMPONENTS_FILE="$COMPONENTS_FILE" python3 - "$RESULTS" "$T" "$DIRECT" <<'PY'
+import csv, math, os, re, sys
 path = sys.argv[1]
 threads = float(sys.argv[2]) if len(sys.argv) > 2 else 1.0
 direct_io = len(sys.argv) > 3 and sys.argv[3] == '1'
@@ -580,6 +858,9 @@ if not components:
 total_w = sum(w for _, _, w in components)
 score = round(sum(v * w for _, v, w in components) / total_w)
 parts = ','.join(name for name, _, _ in components)
+with open(os.environ['ABS_COMPONENTS_FILE'], 'w', encoding='utf-8') as f:
+    for name, value, _ in components:
+        f.write(f'{name}\t{round(value)}\n')
 if missing:
     print(f'PARTIAL - not comparable: {score} (local only: {parts}; missing {",".join(missing)}; network excluded)')
 else:
@@ -822,6 +1103,44 @@ PY
   fi
 }
 
+cloudflare_download() {
+  local attempt value err="$LOGDIR/net-down.err"
+  : >"$err"
+  for attempt in 1 2; do
+    if value="$(curl -fL -sS --connect-timeout 8 --max-time "$NETWORK_TIMEOUT" -o /dev/null \
+        -w '%{speed_download}' "https://speed.cloudflare.com/__down?bytes=$NETWORK_DOWNLOAD_BYTES" 2>>"$err")" \
+        && awk -v x="$value" 'BEGIN{exit !(x+0>0)}'; then
+      NETWORK_VALUE="$value"
+      return 0
+    fi
+  done
+  return 1
+}
+
+cloudflare_upload() {
+  local attempt value err="$LOGDIR/net-up.err"
+  : >"$err"
+  for attempt in 1 2; do
+    if value="$(head -c "$NETWORK_UPLOAD_BYTES" /dev/zero | \
+        curl -fL -sS --connect-timeout 8 --max-time "$NETWORK_TIMEOUT" -o /dev/null \
+          -w '%{speed_upload}' -X POST --data-binary @- 'https://speed.cloudflare.com/__up' 2>>"$err")" \
+        && awk -v x="$value" 'BEGIN{exit !(x+0>0)}'; then
+      NETWORK_VALUE="$value"
+      return 0
+    fi
+  done
+  return 1
+}
+
+network_failure_result() {
+  local log="$1"
+  if grep -q 'curl: (28)' "$log" 2>/dev/null; then
+    printf 'FAILED (timeout after %ss); see %s' "$NETWORK_TIMEOUT" "$log"
+  else
+    printf 'FAILED; see %s' "$log"
+  fi
+}
+
 network_sanity() {
   if [ "$NETWORK" != "1" ]; then
     return 0
@@ -838,16 +1157,18 @@ network_sanity() {
     add "Network Cloudflare TTFB" "FAILED; see $LOGDIR/net-ttfb.err"
   fi
 
-  if down="$(curl -fL -sS --max-time 20 -o /dev/null -w '%{speed_download}' 'https://speed.cloudflare.com/__down?bytes=25000000' 2>"$LOGDIR/net-down.err")" && awk -v x="$down" 'BEGIN{exit !(x+0>0)}'; then
+  if cloudflare_download; then
+    down="$NETWORK_VALUE"
     add "Network Cloudflare download" "$(awk -v b="$down" 'BEGIN{printf "%.2f Mbps", b*8/1000000}')"
   else
-    add "Network Cloudflare download" "FAILED; see $LOGDIR/net-down.err"
+    add "Network Cloudflare download" "$(network_failure_result "$LOGDIR/net-down.err")"
   fi
 
-  if up="$(head -c 10000000 /dev/zero | curl -fL -sS --max-time 20 -o /dev/null -w '%{speed_upload}' -X POST --data-binary @- 'https://speed.cloudflare.com/__up' 2>"$LOGDIR/net-up.err")" && awk -v x="$up" 'BEGIN{exit !(x+0>0)}'; then
+  if cloudflare_upload; then
+    up="$NETWORK_VALUE"
     add "Network Cloudflare upload" "$(awk -v b="$up" 'BEGIN{printf "%.2f Mbps", b*8/1000000}')"
   else
-    add "Network Cloudflare upload" "FAILED; see $LOGDIR/net-up.err"
+    add "Network Cloudflare upload" "$(network_failure_result "$LOGDIR/net-up.err")"
   fi
 }
 
@@ -1104,18 +1425,18 @@ RUN_DIR="$(mktemp -d "$DIR/.abs-run.XXXXXXXX")"
 FIO_FILE="$RUN_DIR/abs.test"
 
 if [ "$NET_INFO" = "1" ]; then
-  echo "Network info lookup enabled: checks IPv4/IPv6 and external IP/ASN. Use --no-net-info to skip."
+  say "已启用网络信息查询：检查 IPv4/IPv6 和外部 IP/ASN。" "Network info lookup enabled: checks IPv4/IPv6 and external IP/ASN. Use --no-net-info to skip."
 fi
 if [ "$NETWORK" = "1" ] && [ "$VERBOSE" = "1" ]; then
-  echo "Network sanity enabled: downloads 25 MB and uploads 10 MB of zero data to Cloudflare. No result upload."
+  say "已启用网络简测：从 Cloudflare 下载 10 MB、上传 5 MB 零数据；不上传结果。" "Network sanity enabled: downloads 10 MB and uploads 5 MB of zero data to Cloudflare. No result upload."
 fi
 if [ "$NETWORK_PROFILE" = "full" ]; then
-  echo "Network-full enabled: adds 3 short public iperf3 regional tests. Public iperf3 can be noisy."
+  say "已启用完整网络测试：增加 3 个公共 iperf3 区域；结果可能波动。" "Network-full enabled: adds 3 short public iperf3 regional tests. Public iperf3 can be noisy."
 elif [ "$NETWORK_PROFILE" = "yabs" ]; then
-  echo "YABS-style network enabled: adds the full public YABS iperf3 list. This is slower/noisier."
+  say "已启用 YABS 网络测试列表；耗时更长，结果可能波动。" "YABS-style network enabled: adds the full public YABS iperf3 list. This is slower/noisier."
 fi
 if [ -n "$IPERF_SERVER" ]; then
-  echo "iperf3 enabled against $IPERF_SERVER for optional send/recv network signal."
+  say "已启用自定义 iperf3：$IPERF_SERVER。" "iperf3 enabled against $IPERF_SERVER for optional send/recv network signal."
 fi
 
 install_tools
@@ -1149,7 +1470,57 @@ NETWORK_MODE="skipped (use --network)"
 [ "$NETWORK" = "1" ] && [ "$NETWORK_PROFILE" = "yabs" ] && NETWORK_MODE="Cloudflare HTTP sanity + YABS public iperf3 list"
 [ "$NETWORK" = "1" ] && [ -n "$IPERF_SERVER" ] && NETWORK_MODE="$NETWORK_MODE + iperf3($IPERF_SERVER)"
 
-if [ "$VERBOSE" = "1" ]; then
+if is_zh; then
+  PROFILE_TARGET_DISPLAY="$PROFILE_TARGET"
+  case "$PROFILE" in
+    quick) PROFILE_DISPLAY="快速"; PROFILE_TARGET_DISPLAY="约 60 秒" ;;
+    default) PROFILE_DISPLAY="默认"; PROFILE_TARGET_DISPLAY="约 3 分钟" ;;
+    full) PROFILE_DISPLAY="完整"; PROFILE_TARGET_DISPLAY="约 5–8 分钟" ;;
+  esac
+  NETWORK_MODE_DISPLAY="已跳过"
+  [ "$NETWORK" = "1" ] && NETWORK_MODE_DISPLAY="Cloudflare HTTP 简测"
+  [ "$NETWORK" = "1" ] && [ "$NETWORK_PROFILE" = "full" ] && NETWORK_MODE_DISPLAY="Cloudflare + 3 个公共 iperf3 区域"
+  [ "$NETWORK" = "1" ] && [ "$NETWORK_PROFILE" = "yabs" ] && NETWORK_MODE_DISPLAY="Cloudflare + YABS iperf3 列表"
+  [ "$NETWORK" = "1" ] && [ -n "$IPERF_SERVER" ] && NETWORK_MODE_DISPLAY="$NETWORK_MODE_DISPLAY + iperf3($IPERF_SERVER)"
+  if [ "$VERBOSE" = "1" ]; then
+    cat <<EOF
+# ABS v$VERSION
+测试模式：$PROFILE_DISPLAY（$PROFILE_TARGET_DISPLAY）
+UTC 时间：$(date -u)
+主机：$HOST
+运行时间：$UPTIME_TEXT
+系统：$DISTRO
+内核：$KERNEL
+CPU：$CPU_MODEL
+CPU 核心：$CPU_CORES @ $CPU_FREQ
+AES-NI：$AES_NI
+VM-x/SVM：$CPU_VIRT
+vCPU：$VCPU
+线程：$T
+内存：$RAM_TEXT
+交换空间：$SWAP_TEXT
+磁盘：$(human_kib "$DISK_FREE_KB") 可用 / $(human_kib "$DISK_TOTAL_KB") 总计，目录 $DIR
+虚拟化：$VM_TYPE
+IPv4/IPv6：$IPV4_STATUS / $IPV6_STATUS
+IP 信息：$IP_INFO
+网络：$NETWORK_MODE_DISPLAY
+fio 大小：$SIZE
+参数：install=$INSTALL, direct=$DIRECT, fio_engine=$FIO_ENGINE, pressure_jobs=$JOBS, pressure_depth=$DEPTH
+时长：每项 ${D} 秒
+工具：sysbench=$(sysbench --version 2>/dev/null | awk '{print $2}' || echo no), fio=$([ -n "$FIO_BIN" ] && "$FIO_BIN" --version 2>/dev/null || echo no), python3=$(python3 --version 2>/dev/null | awk '{print $2}' || echo no), curl=$(curl --version 2>/dev/null | awk 'NR==1{print $2}' || echo no)
+日志：$LOGDIR
+EOF
+  else
+    cat <<EOF
+# ABS v$VERSION — $PROFILE_DISPLAY（$PROFILE_TARGET_DISPLAY）
+主机：$HOST | $VCPU vCPU | $RAM_TEXT 内存 | $VM_TYPE
+CPU：$CPU_MODEL
+磁盘：$(human_kib "$DISK_FREE_KB") 可用 | fio $SIZE | 每项 ${D} 秒
+网络：$NETWORK_MODE_DISPLAY
+日志：$LOGDIR
+EOF
+  fi
+elif [ "$VERBOSE" = "1" ]; then
   cat <<EOF
 # ABS v$VERSION
 Profile  : $PROFILE ($PROFILE_TARGET)
@@ -1188,8 +1559,12 @@ Logs     : $LOGDIR
 EOF
 fi
 
-printf '\n%-48s %s\n' "Metric" "Result"
-printf '%-48s %s\n' "------" "------"
+if is_zh; then
+  printf '\n'
+else
+  printf '\n%-48s %s\n' "Metric" "Result"
+  printf '%-48s %s\n' "------" "------"
+fi
 
 if [ "$INSTALL_ATTEMPTED" = "1" ]; then
   add "Install mode" "package install attempted before benchmark; use -n for no-mutation mode"
@@ -1301,6 +1676,12 @@ iperf_sanity
 
 if have python3; then
   LOCAL_SCORE_TEXT="$(abs_local_score)"
+  if [ -s "$COMPONENTS_FILE" ]; then
+    while IFS=$'\t' read -r component value; do
+      add "$component component score" "$value"
+    done <"$COMPONENTS_FILE"
+    rm -f -- "$COMPONENTS_FILE"
+  fi
   NETWORK_SCORE_TEXT="$(network_score)"
   SCORE_TEXT="$(abs_score)"
   add "ABS SCORE" "$SCORE_TEXT"
@@ -1319,7 +1700,7 @@ else
   add "ABS VERDICT" "$VERDICT_TEXT"
 fi
 add_note "Score note" "ABS score is LOCAL-only: 100% CPU/memory/disk/fsync. Network (Cloudflare sanity or iperf3) is reported separately as a reference and does NOT change the headline score. Use --network-full / --network-yabs / --iperf to see network numbers, or --no-network to skip them entirely."
-add_note "Privacy note" "No result upload. Default network sanity uses Cloudflare (25 MB down, 10 MB zero-data up); package install may contact distro mirrors unless -n is used. --net-info calls IP/ASN endpoints; --no-network skips speed checks."
+add_note "Privacy note" "No result upload. Default network sanity uses Cloudflare (10 MB down, 5 MB zero-data up); package install may contact distro mirrors unless -n is used. --net-info calls IP/ASN endpoints; --no-network skips speed checks."
 
 ELAPSED_SECONDS=$(( $(date +%s) - TIME_START_EPOCH ))
 if have python3; then
@@ -1339,15 +1720,28 @@ else
   add_note "JSON result" "n/a (python3 missing)"
 fi
 
-printf '\n%s\n' "==================== ABS RESULT ===================="
-printf 'SCORE   : %s\n' "$SCORE_TEXT"
-printf 'VERDICT : %s\n' "$VERDICT_TEXT"
-printf 'LOCAL   : %s\n' "$LOCAL_SCORE_TEXT"
-printf 'NETWORK : %s\n' "$NETWORK_SCORE_TEXT"
-printf '%s\n' "===================================================="
+if is_zh; then
+  printf '\n%s\n' "===================== ABS 结果 ====================="
+  printf '得分：%s\n' "$(zh_result "$SCORE_TEXT")"
+  printf '结论：%s\n' "$(zh_verdict "$VERDICT_TEXT")"
+  printf '本地：%s\n' "$(zh_result "$LOCAL_SCORE_TEXT")"
+  printf '网络：%s\n' "$(zh_result "$NETWORK_SCORE_TEXT")"
+  printf '%s\n' "===================================================="
+else
+  printf '\n%s\n' "==================== ABS RESULT ===================="
+  printf 'SCORE   : %s\n' "$SCORE_TEXT"
+  printf 'VERDICT : %s\n' "$VERDICT_TEXT"
+  printf 'LOCAL   : %s\n' "$LOCAL_SCORE_TEXT"
+  printf 'NETWORK : %s\n' "$NETWORK_SCORE_TEXT"
+  printf '%s\n' "===================================================="
+fi
 
 trap - EXIT
 cleanup
 
-printf '\nCompleted in %dm %02ds. TSV summary: %s\n' $((ELAPSED_SECONDS / 60)) $((ELAPSED_SECONDS % 60)) "$RESULTS"
+if is_zh; then
+  printf '\n完成，用时 %d 分 %02d 秒。TSV 结果：%s\n' $((ELAPSED_SECONDS / 60)) $((ELAPSED_SECONDS % 60)) "$RESULTS"
+else
+  printf '\nCompleted in %dm %02ds. TSV summary: %s\n' $((ELAPSED_SECONDS / 60)) $((ELAPSED_SECONDS % 60)) "$RESULTS"
+fi
 exit "$FINAL_STATUS"
